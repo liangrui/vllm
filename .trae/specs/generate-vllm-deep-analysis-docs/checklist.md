@@ -1,0 +1,30 @@
+- [x] 输出目录 `/workspace/ReadCode/` 已创建且结构正确
+- [x] 总览文件 `vllm_code_structure_analysis.md` 包含项目概述、六层架构图、版本演进、目录全景、导航索引、特性一览表、数据流总览、设计哲学共 8 个部分
+- [x] 总览文件的导航索引包含指向全部 21 个分模块文件的正确链接（已修复原始错误路径）
+- [x] `01_architecture_overview.md` 包含分层架构详解、v0→v1 演进、核心数据结构、设计原则，附 Mermaid 图和代码示例 (1082 行)
+- [x] `02_config_system.md` 包含 VllmConfig 及 15+ 子配置类的字段说明、验证逻辑、环境变量覆盖、OptimizationLevel (1212 行)
+- [x] `03_engine_core.md` 包含 LLMEngine/AsyncLLM/EngineCore 分析及完整处理管线说明 (1694 行)
+- [x] `04_scheduler.md` 包含 schedule() 完整逻辑、Continuous Batching、Chunked Prefill、抢占恢复机制 (732 行)
+- [x] `05_pagedattention.md` 包含 PagedAttention 设计思想、KVCacheManager/BlockPool 实现、内存共享、Prefix Caching (1758 行)
+- [x] `06_attention_backends.md` 包含全部注意力后端（FA/FI/MLA/Triton/ROCm/CPU/特殊注意力）的选择逻辑与实现 (1212 行)
+- [x] `07_model_executor.md` 包含 ModelRegistry、200+ 模型列表、主要模型家族分析、Transformer 层组件 (926 行)
+- [x] `08_worker_and_executor.md` 包含三种 Executor 实现、Worker 层、ModelRunner、输入批处理分析 (1894 行)
+- [x] `09_kv_cache.md` 包含 KVCacheManager 层次、Offload/Transfer/Prefix Caching、Block Table 管理 (1406 行)
+- [x] `10_sampling.md` 包含 SamplingParams、Sampler 核心、RejectionSampler/ParallelSampling/Logprobs (1713 行)
+- [x] `11_multimodal.md` 包含 MultiModalRegistry、媒体连接器、特征提取管线、多模态模型支持 (1347 行)
+- [x] `12_quantization.md` 包含量化方案矩阵、FP8/INT4/GPTQ/AWQ/GGUF/NVFP4/Marlin/Machete 分析 (1155 行)
+- [x] `13_distributed.md` 包含 TP/PP/DP/EP 四种并行策略、通信原语、Transfer 机制、Elastic EP (1292 行)
+- [x] `14_lora.md` 包含 LoRA 核心组件、Layer 实现、Punica Wrapper、动态加载卸载 (1336 行)
+- [x] `15_api_layer.md` 包含 OpenAI/Anthropic/gRPC/CLI 接口、Batch Serving、MCP Tool Server (1194 行)
+- [x] `16_cuda_kernels.md` 包含构建系统、7 类内核分析、平台特定内核（CPU/ROCm）(1646 行)
+- [x] `17_compilation_and_optimization.md` 包含 torch.compile 集成、CUDA Graphs、支撑系统全貌 (1297 行)
+- [x] `18_structured_output.md` 包含四种后端实现、五种支持结构类型分析 (1622 行)
+- [x] `19_speculative_decode.md` 包含推测解码原理、8 种草稿方法、指标分析 (1169 行)
+- [x] `20_metrics_and_monitoring.md` 包含指标收集、日志系统、OpenTelemetry、Profiling (1290 行)
+- [x] `21_design_patterns.md` 包含 9 种设计模式、代码组织原则、可扩展性设计、性能优化策略 (1435 行)
+- [x] 每个 Markdown 文件均以「定位」+「📌 Mermaid 图示化总括」开头
+- [x] 每个文件中的代码示例均来自实际源码并标注文件路径和行号范围
+- [x] 每个 Mermaid 图使用不同配色方案
+- [x] 全部文档使用中文撰写，技术术语保留英文
+- [x] 文件间交叉引用链接正确（已验证并修复导航索引）
+- [x] 术语和格式风格统一一致

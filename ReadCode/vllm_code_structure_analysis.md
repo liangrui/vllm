@@ -1,1223 +1,846 @@
-# vLLM 代码结构深度分析报告
+# vLLM 源码结构分析 — 总览导航
 
-## 📋 目录
-- [1. 项目概述](#1-项目概述)
-- [2. 整体架构](#2-整体架构)
-- [3. 核心模块详解](#3-核心模块详解)
-- [4. 关键技术特性](#4-关键技术特性)
-- [5. 执行流程](#5-执行流程)
-- [6. 代码组织与设计模式](#6-代码组织与设计模式)
-- [7. 技术栈与依赖](#7-技术栈与依赖)
-- [8. 总结与洞察](#8-总结与洞察)
+> **定位**：本文档是 vLLM 源码分析系列（共 22 篇）的**总览导航入口与宏观概览**，旨在为读者建立对 vLLM 整体架构的全局认知地图。建议首次阅读时按顺序浏览本文档的全部章节，之后可作为快速查阅索引使用。
 
 ---
 
-## 1. 项目概述
+## 📌 全局知识图谱
+
+```mermaid
+mindmap
+  root((vLLM<br/>源码全景))
+    项目概述
+      PagedAttention
+      Continuous Batching
+      高吞吐低延迟推理引擎
+    六层架构
+      服务层 entrypoints/
+        OpenAI API 兼容
+        Anthropic API
+        CLI 入口
+      引擎层 engine/ & v1/engine/
+        LLMEngine (v1)
+        AsyncLLMEngine
+        EngineCore / EngineCoreProc
+      调度核心 v1/core/sched/
+        SchedulerInterface
+        RequestQueue
+        Chunked Prefill
+      执行器层 v1/executor/
+        UniprocExecutor
+        MultiprocExecutor
+        RayExecutor
+      模型执行器 v1/worker/
+        GPUModelRunner
+        CPUModelRunner
+        WorkerBase
+      内核层 kernels/ & compilation/
+        Attention Kernels
+        Custom Ops
+        torch.compile Passes
+    关键技术
+      KV Cache 管理
+      Speculative Decoding
+      LoRA 动态适配
+      多模态支持
+      分布式并行
+    配置体系 config/
+      VllmConfig 聚合
+      20+ 子配置项
+      Optimization Level O0-O3
+```
+
+---
+
+## 一、项目概述
 
 ### 1.1 基本信息
-- **项目名称**: vLLM (Virtual Large Language Model)
-- **定位**: 高吞吐量、内存高效的大语言模型推理和服务引擎
-- **开发起源**: UC Berkeley Sky Computing Lab
-- **许可证**: Apache-2.0
-- **Python版本**: >=3.10, <3.15
-- **核心依赖**: PyTorch 2.11.0, FastAPI, pydantic
+
+| 属性 | 值 |
+|------|-----|
+| **项目名称** | vLLM |
+| **定位** | 高吞吐、内存高效的大语言模型（LLM）推理与服务引擎 |
+| **开源协议** | Apache-2.0 |
+| **核心口号** | *"a high-throughput and memory-efficient inference engine for LLMs"*（见 [`__init__.py`](file:///workspace/vllm/__init__.py#L3)） |
+| **版本管理** | 通过 [`version.py`](file:///workspace/vllm/version.py) → `_version.py` 管理，开发版显示 `dev` |
 
 ### 1.2 核心价值主张
-根据 [README.md](../README.md) 的描述：
-- **PagedAttention**: 创新的KV缓存内存管理机制（类似操作系统的分页管理）
-- **Continuous Batching**: 持续批处理，支持chunked prefill和prefix caching
-- **高性能推理**: 支持CUDA/HIP graphs、torch.compile等优化
-- **广泛模型支持**: 200+种HuggingFace模型架构
-- **多硬件支持**: NVIDIA GPU、AMD GPU、CPU、TPU等多种硬件平台
-- **量化支持**: FP8、INT8/INT4、GPTQ/AWQ、GGUF等多种量化方案
+
+vLLM 的核心竞争力源于两项奠基性技术创新：
+
+- **PagedAttention**：将操作系统虚拟内存的分页（Paging）思想引入注意力计算中的 KV Cache 管理。将 KV Cache 按固定大小的 Block 组织，实现非连续内存分配，极大减少内存碎片和浪费。
+- **Continuous Batching（连续批处理）**：突破传统静态批处理的限制，在一个迭代步（iteration step）内动态地混排处于不同阶段（prefill / decode）的请求，实现 GPU 利用率的最大化。
+
+### 1.3 生态地位
+
+vLLM 已成为 LLM 推理服务的事实标准之一：
+- 提供 **OpenAI 兼容 API** 服务端（[`entrypoints/openai/api_server.py`](file:///workspace/vllm/entrypoints/openai/api_server.py)）
+- 支持 **Anthropic 兼容协议**（[`entrypoints/anthropic/`](file:///workspace/vllm/entrypoints/anthropic/)）
+- 支持 **200+ 模型架构**（见 [`model_executor/models/`](file:///workspace/vllm/model_executor/models/) 目录下的模型文件）
+- 支持 **多模态**（视觉、音频、视频）、**LoRA**、**Speculative Decoding**、**前缀缓存**、**分布式并行**（TP/PP/DP/EP）等企业级特性
 
 ---
 
-## 2. 整体架构
+## 二、整体架构图
 
-vLLM采用**分层架构**设计，从上到下分为：
+vLLM 采用清晰的**六层分层架构**，自上而下依次为：
 
+```mermaid
+graph TB
+    subgraph L6["🔷 第六层：服务层 — entrypoints/"]
+        direction TB
+        A6_1["OpenAI API Server<br/>api_server.py"]
+        A6_2["Anthropic API<br/>serving.py"]
+        A6_3["CLI / serve.py<br/>launch.py"]
+        A6_4["LLM 高级封装<br/>entrypoints/llm.py :: LLM"]
+    end
+
+    subgraph L5["🔶 第五层：引擎层 — engine/ & v1/engine/"]
+        direction TB
+        A5_1["AsyncLLMEngine<br/>异步引擎封装"]
+        A5_2["LLMEngine ~v1.engine.llm_engine.LLMEngine<br/>引擎总控（已迁移至 v1）"]
+        A5_3["EngineCore / EngineCoreProc<br/>引擎内核 + ZMQ 进程通信"]
+        A5_4["EngineCoreClient<br/>引擎内核客户端"]
+        A5_5["InputProcessor / OutputProcessor<br/>输入输出处理"]
+        A5_6["Detokenizer<br/>反 Tokenize"]
+    end
+
+    subgraph L4["🔸 第四层：调度核心 — v1/core/sched/"]
+        direction TB
+        A4_1["SchedulerInterface<br/>调度器抽象接口"]
+        A4_2["Scheduler<br/>核心调度器实现"]
+        A4_3["AsyncScheduler<br/>异步调度器"]
+        A4_4["RequestQueue<br/>请求队列管理"]
+        A4_5["chunked_prefill<br/>分块预填充"]
+    end
+
+    subgraph L3["🟢 第三层：执行器层 — v1/executor/"]
+        direction TB
+        A3_1["Executor 抽象基类<br/>abstract.py"]
+        A3_2["UniprocExecutor<br/>单进程执行器"]
+        A3_3["MultiprocExecutor<br/>多进程执行器"]
+        A3_4["RayExecutor / RayExecutorV2<br/>Ray 分布式执行器"]
+    end
+
+    subgraph L2["🟡 第二层：模型执行器 — v1/worker/"]
+        direction TB
+        A2_1["WorkerBase<br/>Worker 抽象基类"]
+        A2_2["GPUWorker / GPUModelRunner<br/>GPU 模型运行器"]
+        A2_3["CPUWorker / CPUModelRunner<br/>CPU 模型运行器"]
+        A2_4["GPUInputBatch / UBatchWrapper<br/>输入批次封装"]
+        A2_5["LoRA Model Runner Mixin<br/>LoRA 适配混合"]
+        A2_6["KV Connector Mixin<br/>KV Cache 连接器"]
+    end
+
+    subgraph L1["🔴 第一层：内核层 — kernels/ & compilation/"]
+        direction TB
+        A1_1["Attention Backends<br/>FlashInfer / FlashAttn / XFormers"]
+        A1_2["Custom Ops<br/>RMSNorm / SiLU / RotaryEmb / QuantFP8"]
+        A1_3["torch.compile Passes<br/>Inductor / Fusion / Graph Partition"]
+        A1_4["CUDA Graphs<br/>Piecewise & Full CUDAGraph"]
+        A1_5["Triton Kernels<br/>自定义 Triton 算子"]
+        A1_6["csrc/<br/>C++/CUDA 扩展内核"]
+    end
+
+    L6 -->|"HTTP/gRPC 请求"| L5
+    L5 -->|"add_request()"| L4
+    L4 -->|"schedule() → SchedulerOutput"| L3
+    L3 -->|"execute_model()"| L2
+    L2 -->|"model forward()"| L1
+
+    style L6 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style L5 fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style L4 fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style L3 fill:#fce4ec,stroke:#c62828,stroke-width:2px
+    style L2 fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    style L1 fill:#fffde7,stroke:#f9a825,stroke-width:2px
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    服务层 (Entrypoints)                       │
-│   OpenAI API / Anthropic API / gRPC / CLI / Batch Serving    │
-├─────────────────────────────────────────────────────────────┤
-│                    引擎层 (Engine)                            │
-│   LLM (高级API) → AsyncLLMEngine → LLMEngine → EngineCore    │
-├─────────────────────────────────────────────────────────────┤
-│                    调度核心 (Core)                            │
-│   Scheduler → KV Cache Manager → Request Queue               │
-├─────────────────────────────────────────────────────────────┤
-│                   执行器层 (Executor)                         │
-│   UniProc / MultiProc / Ray Executor → Worker                │
-├─────────────────────────────────────────────────────────────┤
-│                 模型执行器 (Model Executor)                   │
-│   Model Runner → Attention Layers → Linear Layers            │
-├─────────────────────────────────────────────────────────────┤
-│                  内核层 (Kernels/CUDA)                        │
-│   Custom CUDA Kernels / CUTLASS / FlashAttention             │
-└─────────────────────────────────────────────────────────────┘
-```
 
-### 2.1 版本演进
-从代码中可以看出，vLLM正在经历**v0 → v1的架构升级**：
+### 各层职责速查
 
-**关键发现**：
-- [`engine/llm_engine.py`](../vllm/engine/llm_engine.py) 现在只是v1版本的别名包装：
+| 层级 | 核心目录 | 核心职责 | 关键类/模块 |
+|------|----------|----------|-------------|
+| **L6 服务层** | `entrypoints/` | 对外提供 API 服务、CLI 入口、高级 SDK 封装 | `LLM`, `ApiServer`, `OpenAIServing` |
+| **L5 引擎层** | `engine/`, `v1/engine/` | 引擎生命周期管理、请求编排、进程通信 | `LLMEngine`, `EngineCore`, `EngineCoreProc`, `AsyncLLMEngine` |
+| **L4 调度核心** | `v1/core/sched/` | 请求排队、策略调度、Chunked Prefill、KV Cache 分配 | `Scheduler`, `SchedulerInterface`, `RequestQueue` |
+| **L3 执行器层** | `v1/executor/` | 多进程/多节点分布式执行策略 | `UniprocExecutor`, `MultiprocExecutor`, `RayExecutor` |
+| **L2 模型执行器** | `v1/worker/` | 模型加载、前向传播、采样、CUDA Graph 管理 | `GPUModelRunner`, `WorkerBase`, `GPUWorker` |
+| **L1 内核层** | `kernels/`, `compilation/`, `csrc/` | 底层算子、注意力后端、编译优化、CUDA/C++ 扩展 | FlashInfer, CustomOps, InductorPasses |
+
+---
+
+## 三、版本演进路线：v0 → v1 迁移策略
+
+### 3.1 迁移背景
+
+vLLM 经历了一次重大的架构重构——从 v0 架构迁移到 **v1 架构**。这次重构的核心目标是：
+
+1. **解耦 Engine Core**：将引擎的核心调度循环（`EngineCore`）从对外接口中分离出来，支持跨进程部署
+2. **引入 ZMQ 进程通信**：通过 ZeroMQ 实现 EngineCore 与前端的高效 IPC
+3. **支持 Data Parallel（DP）**：原生支持数据并行和弹性扩缩容（Elastic EP）
+4. **统一 Async Scheduling**：内置异步调度能力
+
+### 3.2 向后兼容机制
+
+vLLM 在迁移过程中采用了精巧的**向后兼容策略**，确保现有用户代码无需修改即可升级：
+
+#### （1）`LLMEngine` 别名重定向
+
+在 [`engine/llm_engine.py`](file:///workspace/vllm/engine/llm_engine.py) 中，原来的 `LLMEngine` 类已被替换为一个简单的别名重定向：
+
 ```python
 from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 LLMEngine = V1LLMEngine  # type: ignore
+"""The `LLMEngine` class is an alias of [vllm.v1.engine.llm_engine.LLMEngine][]."""
 ```
 
-- [`engine/async_llm_engine.py`](../vllm/engine/async_llm_engine.py) 同样是v1的包装：
+这意味着所有 `from vllm import LLMEngine` 的导入都会自动指向 v1 版本。
+
+#### （2）`__getattr__` 延迟导入
+
+在 [`__init__.py`](file:///workspace/vllm/__init__.py#L65-L73) 中，使用了 Python 3.7+ 的 `__getattr__` 延迟导入机制：
+
 ```python
-from vllm.v1.engine.async_llm import AsyncLLM
-AsyncLLMEngine = AsyncLLM  # type: ignore
-```
-
-这表明vLLM正在将核心逻辑迁移到`vllm/v1/`目录下，保持向后兼容。
-
----
-
-## 3. 核心模块详解
-
-### 3.1 🔧 配置系统 (`vllm/config/`)
-
-**位置**: [config/](../vllm/config/)
-
-**核心配置类** - [`VllmConfig`](../vllm/config/vllm.py):
-```python
-class VllmConfig:
-    model_config: ModelConfig           # 模型配置
-    cache_config: CacheConfig          # 缓存配置
-    parallel_config: ParallelConfig    # 并行配置
-    scheduler_config: SchedulerConfig  # 调度器配置
-    device_config: DeviceConfig        # 设备配置
-    load_config: LoadConfig            # 加载配置
-    lora_config: LoRAConfig            # LoRA配置
-    quantization_config: ...           # 量化配置
-    # ... 更多配置项
-```
-
-**配置文件清单** (28个配置模块):
-- `attention.py` - 注意力机制配置
-- `cache.py` - KV缓存配置
-- `compilation.py` - 编译优化配置（CUDAGraph模式）
-- `device.py` - 设备配置
-- `parallel.py` - 并行策略配置（TP/PP/DP/EP）
-- `scheduler.py` - 调度策略配置
-- `quantization.py` - 量化方法配置
-- `speculative.py` - 推测解码配置
-- `reasoning.py` - 推理模式配置
-- `structured_outputs.py` - 结构化输出配置
-
-**优化级别定义**:
-```python
-class OptimizationLevel(IntEnum):
-    O0 = 0  # 无优化
-    O1 = 1  # 快速优化：Dynamo+Inductor + Piecewise CUDAGraphs
-    O2 = 2  # 完全优化：O1 + Full/Piecewise CUDAGraphs
-    O3 = 3  # 当前等同于O2s
-```
-
-### 3.2 🚀 引擎系统 (`vllm/engine/` + `vllm/v1/engine/`)
-
-#### 3.2.1 高级API层 - [`LLM`](../vllm/entrypoints/llm.py) 类
-
-这是用户最常使用的接口，提供：
-- 文本生成（generate）
-- 嵌入（embed）
-- 分类（classify）
-- 评分（scoring）
-- 聊天补全（chat）
-- 结构化输出
-
-**关键特性**:
-```python
-class LLM:
-    """包含tokenizer、语言模型（可能分布在多个GPU上）、GPU内存空间的完整类"""
-    
-    def __init__(self, model, tokenizer, tensor_parallel_size, 
-                 dtype, quantization, gpu_memory_utilization, ...)
-```
-
-#### 3.2.2 异步引擎 - [`AsyncLLM`](../vllm/v1/engine/async_llm.py)
-
-提供异步生成能力，支持流式输出。
-
-#### 3.2.3 引擎核心 - [`LLMEngine`](../vllm/v1/engine/llm_engine.py)
-
-**核心组件**:
-```python
-class LLMEngine:
-    def __init__(self, vllm_config, executor_class, ...):
-        self.input_processor = InputProcessor(...)      # 输入预处理
-        self.output_processor = OutputProcessor(...)     # 输出后处理
-        self.engine_core = EngineCoreClient.make_client(...)  # 引擎核心
-        self.logger_manager = StatLoggerManager(...)    # 日志统计
-```
-
-**职责**:
-1. 管理请求生命周期
-2. 协调输入/输出处理
-3. 与底层EngineCore通信
-4. 收集性能指标
-
-#### 3.2.4 引擎核心客户端 - [`EngineCoreClient`](../vllm/v1/engine/core_client.py)
-
-负责与实际执行引擎的IPC通信。
-
-### 3.3 📅 调度系统 (`vllm/v1/core/sched/`)
-
-**位置**: [v1/core/sched/](../vllm/v1/core/sched/)
-
-#### 3.3.1 调度器 - [`Scheduler`](../vllm/v1/core/sched/scheduler.py)
-
-**核心功能**:
-```python
-class Scheduler(SchedulerInterface):
-    def __init__(self, vllm_config, kv_cache_config, 
-                 structured_output_manager, block_size, ...):
-        self.vllm_config = vllm_config
-        self.kv_cache_config = kv_cache_config
-        self.structured_output_manager = structured_output_manager
-```
-
-**调度策略**:
-- 请求排队管理 ([`RequestQueue`](../vllm/v1/core/sched/request_queue.py))
-- 预填充（Prefill）和解码（Decode）调度
-- KV缓存块分配
-- 迭代级调度控制
-- Chunked prefill支持
-- Prefix caching集成
-
-**调度输出** ([`SchedulerOutput`](../vllm/v1/core/sched/output.py)):
-```python
-@dataclass
-class SchedulerOutput:
-    scheduled_reqs: List[Request]         # 本次调度的请求
-    cached_reqs: List[CachedRequestData]  # 缓存的请求数据
-    grammar_output: Optional[GrammarOutput]  # 结构化输出语法信息
-    # ...
-```
-
-### 3.4 ⚡ 执行器系统 (`vllm/v1/executor/`)
-
-**位置**: [v1/executor/](../vllm/v1/executor/)
-
-**执行器类型**:
-
-| 执行器 | 类名 | 用途 |
-|--------|------|------|
-| 单进程 | `UniProcExecutor` | 单GPU或单进程部署 |
-| 多进程 | `MultiProcExecutor` | 多GPU多进程部署 |
-| Ray | `RayExecutor` / `RayExecutorV2` | 基于Ray的分布式部署 |
-
-**抽象基类** - [`Executor`](../vllm/v1/executor/abstract.py):
-```python
-class Executor(ABC):
-    @abstractmethod
-    def _execute(self, ...): ...
-    
-    @classmethod
-    def get_class(cls, vllm_config): ...
-```
-
-**选择逻辑**:
-```python
-@classmethod
-def get_class(cls, vllm_config):
-    parallel_config = vllm_config.parallel_config
-    if parallel_config.distributed_executor_backend == "ray":
-        return RayExecutorV2
-    elif enable_multiprocessing:
-        return MultiProcExecutor
+def __getattr__(name: str) -> typing.Any:
+    from importlib import import_module
+    if name in MODULE_ATTRS:
+        module_name, attr_name = MODULE_ATTRS[name].split(":")
+        module = import_module(module_name, __package__)
+        return getattr(module, attr_name)
     else:
-        return UniProcExecutor
+        raise AttributeError(f"module {__package__} has no attribute {name}")
 ```
 
-### 3.5 👷 Worker系统 (`vllm/v1/worker/`)
+配合 `MODULE_ATTRS` 字典映射表（[第16-39行](file:///workspace/vllm/__init__.py#L16-L39)），实现了：
+- **按需加载**：只有当用户实际访问某个属性时才触发对应模块的导入
+- **零成本兼容**：不增加启动时的导入开销
+- **统一入口**：`from vllm import LLMEngine, SamplingParams, LLM` 等写法全部生效
 
-**位置**: [v1/worker/](../vllm/v1/worker/)
+#### （3）v1 引擎内部结构
 
-#### 3.5.1 Worker基类 - [`WorkerBase`](../vllm/v1/worker/worker_base.py)
+v1 引擎的核心组件关系如下：
 
-所有Worker的基类，定义统一接口。
+```mermaid
+classDiagram
+    class LLMEngine {
+        +engine_core_client: EngineCoreClient
+        +input_processor: InputProcessor
+        +output_processor: OutputProcessor
+        +add_request()
+        +step()
+        +abort_request()
+    }
 
-#### 3.5.2 GPU Worker - [`GPUWorker`](../vllm/v1/worker/gpu_worker.py)
+    class EngineCoreClient {
+        +core_engine_type: type
+        +add_request()
+        +abort_requests()
+        +step()
+        +shutdown()
+    }
 
-**核心组件**:
-- [`ModelRunner`](../vllm/v1/worker/gpu/model_runner.py): 实际模型执行
-- [`InputBatch`](../vllm/v1/worker/gpu/input_batch.py): 输入批处理
-- [`BlockTable`](../vllm/v1/worker/gpu/block_table.py): KV缓存块表管理
-- [`SampleOps`](../vllm/v1/worker/gpu/sample/): 采样操作
-- [`SpecDecode`](../vllm/v1/worker/gpu/spec_decode/): 推测解码实现
-- [`CuDGraphUtils`](../vllm/v1/worker/gpu/cudagraph_utils.py): CUDA图工具
+    class EngineCore {
+        +scheduler: SchedulerInterface
+        +model_executor: Executor
+        +structured_output_manager
+        +add_request()
+        +step() tuple~dict, bool~
+        +abort_requests()
+        +shutdown()
+    }
 
-**ModelRunner的关键方法**:
-```python
-class GPUModelRunner:
-    def execute_model(self, model_input, ...):
-        # 1. 准备输入
-        # 2. 执行前向传播
-        # 3. 采样
-        # 4. 更新KV缓存
-        # 5. 返回输出
+    class EngineCoreProc {
+        +input_queue: Queue
+        +output_queue: Queue
+        +run_busy_loop()
+        +process_input_sockets()
+        +process_output_sockets()
+    }
+
+    class DPEngineCoreProc {
+        +dp_group
+        +step_counter
+        +current_wave
+        +run_busy_loop()
+        +_has_global_unfinished_reqs()
+    }
+
+    LLMEngine --> EngineCoreClient : owns
+    EngineCoreClient ..> EngineCore : manages (in-proc)
+    EngineCoreClient ..> EngineCoreProc : manages (multi-proc)
+    EngineCore <|-- EngineCoreProc : extends with ZMQ
+    EngineCoreProc <|-- DPEngineCoreProc : extends for MoE DP
 ```
 
-#### 3.5.3 CPU Worker - [`CPUWorker`](../vllm/v1/worker/cpu_worker.py)
-
-针对CPU优化的Worker实现。
-
-### 3.6 🎯 注意力机制 (`vllm/v1/attention/`)
-
-**位置**: [v1/attention/](../vllm/v1/attention/)
-
-这是vLLM最核心的创新之一！
-
-#### 3.6.1 注意力后端
-
-**标准注意力后端**:
-- `flash_attn.py` - FlashAttention（NVIDIA官方实现）
-- `flashinfer.py` - FlashInfer（高性能推理库）
-- `triton_attn.py` - Triton自定义内核
-- `rocm_attn.py` - AMD ROCm优化
-- `cpu_attn.py` - CPU实现
-- `linear_attn.py` - 线性注意力（用于长序列）
-- `flex_attention.py` - PyTorch FlexAttention
-- `turboquant_attn.py` - TurboQuant量化注意力
-
-**MLA (Multi-head Latent Attention)** 后端**:
-- `mla/flash_attn.py` - DeepSeek MLA的FlashAttention实现
-- `mla/flashinfer.py` - FlashInfer MLA版本
-- `mla/triton_mla.py` - Triton MLA实现
-- `mla/cutlass_mla.py` - CUTLASS MLA内核
-- `mla/flashmla.py` - FlashMLA实现
-- `mla/xpu_mla_sparse.py` - Intel XPU稀疏MLA
-
-**特殊注意力变体**:
-- `mamba_attn.py` - Mamba状态空间模型
-- `mamba1_attn.py` / `mamba2_attn.py` - Mamba1/Mamba2
-- `short_conv_attn.py` - 短卷积注意力（RWKV等）
-- `gdn_attn.py` - 全局深度归一化
-
-#### 3.6.2 注意力操作 ([ops/](../vllm/v1/attention/ops/))
-
-**核心操作**:
-- `paged_attn.py` - **PagedAttention核心实现**
-- `triton_prefill_attention.py` - Triton预填充注意力
-- `triton_decode_attention.py` - Triton解码注意力
-- `triton_unified_attention.py` - 统一注意力内核
-- `chunked_prefill_paged_decode.py` - 分块预填充+分页解码
-- `prefix_prefill.py` - 前缀预填充优化
-- `merge_attn_states.py` - 合并注意力状态
-
-**MLA专用操作**:
-- `deepseek_v4_ops/` - DeepSeek-V4压缩/量化操作
-- `flashmla.py` - FlashMLA接口封装
-
-### 3.7 💾 KV缓存管理 (`vllm/v1/core/`)
-
-**位置**: [v1/core/](../vllm/v1/core/)
-
-#### 3.7.1 KVCacheManager - [`KVCacheManager`](../vllm/v1/core/kv_cache_manager.py)
-
-**PagedAttention的核心**:
-```python
-class KVCacheManager:
-    def __init__(self, ...):
-        self.block_pool: BlockPool              # 物理内存块池
-        self.block_table: Dict[int, BlockTable]  # 请求→块表映射
-    
-    def allocate_blocks(self, request_id, num_blocks):
-        # 从block_pool分配块
-        
-    def free_blocks(self, request_id):
-        # 释放块的物理内存
-        
-    def can_allocate(self, num_blocks) -> bool:
-        # 检查是否有足够的空间
-```
-
-**关键数据结构**:
-- `BlockPool`: 管理物理内存块
-- `BlockTable`: 逻辑块到物理块的映射
-- `KVCacheBlocks`: KV缓存的块表示
-
-#### 3.7.2 其他缓存管理器
-
-- [`EncoderCacheManager`](../vllm/v1/core/encoder_cache_manager.py): 编码器缓存（用于encoder-decoder模型）
-- [`SingleTypeKVCacheManager`](../vllm/v1/core/single_type_kv_cache_manager.py): 单类型缓存管理器
-- [`KVCacheCoordinator`](../vllm/v1/core/kv_cache_coordinator.py): 多节点KV缓存协调
-
-### 3.8 🎨 模型执行器 (`vllm/model_executor/`)
-
-**位置**: [model_executor/](../vllm/model_executor/)
-
-#### 3.8.1 层实现 (`layers/`)
-
-**注意力层** ([layers/attention/](../vllm/model_executor/layers/attention/)):
-- `attention.py` - 标准多头注意力
-- `chunked_local_attention.py` - 分块局部注意力（LongBench等长文本）
-- `cross_attention.py` - 交叉注意力（encoder-decoder模型）
-- `mla_attention.py` - MLA注意力（DeepSeek-V3/V4/R1/Qwen3等）
-- `mm_encoder_attention.py` - 多模态编码器注意力
-- `static_sink_attention.py` - 静态sink注意力
-
-**线性层** ([kernels/linear/](../vllm/model_executor/kernels/linear/)):
-- **混合精度**: MPLinearKernel及其多种后端
-  - `cutlass.py` - CUTLASS GEMM
-  - `marlin.py` - Marlin量化GEMM
-  - `machete.py` - Machete高性能内核
-  - `exllama.py` - EXLlama量化
-  - `dynamic_4bit.py` - 动态4bit量化
-  
-- **MXFP8量化**: Mxfp8LinearKernel
-  - `marlin.py`, `flashinfer.py`, `emulation.py`
-  
-- **NVFP4量化**: NVFP4LinearKernel
-  - `cutlass.py`, `flashinfer.py`, `fbgemm.py`
-  
-- **缩放矩阵乘法**: ScaledMMLinearKernel / BlockScaledMMLinearKernel
-  - 支持 `aiter`, `cutlass`, `deep_gemm`, `flashinfer`, `marlin`, `pytorch`, `triton`, `xpu`
-
-**MoE层** ([layers/fused_moe/](../vllm/model_executor/layers/fused_moe/)):
-- **融合MoE实现**:
-  - 配置驱动：根据E(专家数)、N(中间维度)、设备自动选择最优内核
-  - 支持的设备：NVIDIA A100/H100/H200/H20/B200/GB200, AMD MI300X/MI308X/MI350X等
-  - 支持的数据类型：fp16, bf16, fp8_w8a8, int8_w8a16, int4_w4a16
-  - 特殊形状：支持各种block_shape（如[128,128]）
-
-**激活函数**:
-- `activation.py` - SiLU、GELU等
-- `deepseek_compressor.py` - DeepSeek压缩器
-- `conv.py` - 卷积层（Hybrid模型）
-
-### 3.9 🌐 服务入口 (`vllm/entrypoints/`)
-
-**位置**: [entrypoints/](../vllm/entrypoints/)
-
-#### 3.9.1 OpenAI兼容服务器
-
-**目录结构** ([openai/](../vllm/entrypoints/openai/)):
-```
-openai/
-├── api_server.py           # 主服务器
-├── chat_completion/        # 聊天补全API
-│   ├── api_router.py       # 路由定义
-│   ├── protocol.py         # 协议定义
-│   └── serving.py          # 服务逻辑
-├── completion/             # 文本补全API
-├── responses/              # Responses API（新OpenAI格式）
-├── models/                 # 模型管理API
-├── embed/                  # 嵌入API
-├── realtime/               # 实时API（WebSocket）
-├── speech_to_text/         # 语音转文字API
-└── engine/                 # 引擎状态API
-```
-
-**支持的API端点** (基于OpenAI规范):
-- `POST /v1/chat/completions` - 聊天补全
-- `POST /v1/completions` - 文本补全
-- `POST /v1/embeddings` - 向量嵌入
-- `GET /v1/models` - 模型列表
-- WebSocket实时连接
-
-#### 3.9.2 Anthropic兼容服务器
-
-**位置**: [anthropic/](../vllm/entrypoints/anthropic/)
-- Messages API协议实现
-- 流式响应支持
-
-#### 3.9.3 其他服务入口
-
-- **gRPC服务器** - [`grpc_server.py`](../vllm/entrypoints/grpc_server.py)
-- **CLI工具** - [`cli/`](../vllm/entrypoints/cli/)
-  - `serve` - 启动服务
-  - `benchmark` - 性能测试（延迟/吞吐量/启动时间）
-  - `openai` - OpenAI客户端
-  - `run_batch` - 批处理执行
-- **SageMaker** - AWS SageMaker部署
-- **MCP (Model Context Protocol)** - 工具调用协议支持
-
-#### 3.9.4 Pooling服务
-
-**位置**: [pooling/](../vllm/entrypoints/pooling/)
-- **嵌入** ([embed/](../vllm/entrypoints/pooling/embed/)): 文本向量化
-- **分类** ([classify/](../vllm/entrypoints/pooling/classify/)): 文本分类
-- **评分** ([scoring/](../vllm/entrypoints/pooling/scoring/)): 序列评分
-- **池化** ([pooling/](../vllm/entrypoints/pooling/pooling/)): 通用池化
-
-### 3.10 🌍 分布式系统 (`vllm/distributed/`)
-
-**位置**: [distributed/](../vllm/distributed/)
-
-#### 3.10.1 并行策略
-
-**支持的并行方式**:
-1. **张量并行 (TP)** - Tensor Parallelism
-   - 将模型参数分割到多个GPU
-   - 通过AllReduce同步梯度
-   
-2. **流水线并行 (PP)** - Pipeline Parallelism
-   - 将模型层分割到不同阶段
-   - 微流水线调度
-   
-3. **数据并行 (DP)** - Data Parallelism
-   - 复制模型到多个GPU
-   - 梯度平均
-   
-4. **专家并行 (EP)** - Expert Parallelism
-   - MoE模型的专家分布
-   - All-to-All通信
-   
-5. **上下文并行 (CP)** - Context Parallelism
-   - 长序列的分片处理
-   - Ring注意力等
-
-#### 3.10.2 通信原语
-
-**设备通信器** ([device_communicators/](../vllm/distributed/device_communicators/)):
-- `cuda_communicator.py` - NCCL CUDA通信
-- `custom_all_reduce.py` - 自定义AllReduce算法
-- `shm_broadcast.py` - 共享内存广播
-- `quick_all_reduce.py` - 快速AllReduce（小张量）
-- `flashinfer_all_reduce.py` - FlashInfer集成的AllReduce
-- `ray_communicator.py` - Ray框架通信
-- `cpu_communicator.py` - CPU通信
-- `xpu_communicator.py` - Intel XPU通信
-
-#### 3.10.3 KV传输系统
-
-**位置**: [kv_transfer/](../vllm/distributed/kv_transfer/)
-
-**解耦架构 (Disaggregation)**:
-- **Prefill-Decode分离**: 预填充和解码在不同节点执行
-- **连接器架构**:
-  - `lmcache_connector.py` - LMCache集成
-  - `mooncake_connector.py` - 月之暗面Mooncake协议
-  - `nixl_connector.py` - NVIDIA NIXL传输
-  - `p2p_nccl_connector.py` - P2P NCCL直连
-  - `offloading_connector.py` - CPU卸载
-  - `moriio_connector.py` - MoriIO存储
-  - `hf3fs_connector.py` - HDFS 3FS分布式存储
-
-**工作流程**:
-```
-Prefill Node --[KV Connector]--> Decode Node
-     ↓                              ↓
-  计算KV缓存                    接收并使用KV缓存
-```
-
-#### 3.10.4 弹性扩展
-
-**位置**: [elastic_ep/](../vllm/distributed/elastic_ep/)
-- 动态扩缩容
-- Standby状态机
-- 弹性执行协调
-
-**EPLB (Elastic Policy Load Balancing)**:
-- 负载均衡策略
-- 异步Worker管理
-- 重平衡执行
-
-### 3.11 🖼️ 多模态系统 (`vllm/multimodal/`)
-
-**位置**: [multimodal/](../vllm/multimodal/)
-
-#### 3.11.1 支持的模态
-
-- **图像** ([image.py](../vllm/multimodal/image.py))
-- **音频** ([audio.py](../vllm/multimodal/audio.py))  
-- **视频** ([video.py](../vllm/multimodal/video.py))
-
-#### 3.11.2 核心组件
-
-**注册表** ([registry.py](../vllm/multimodal/registry.py)):
-- MultiModalRegistry: 多模态处理器注册中心
-- 自动识别输入类型并路由到对应处理器
-
-**处理流水线** ([processing/](../vllm/multimodal/processing/)):
-```
-原始输入 → Processor → DummyInputs → Context → Engine Input
-```
-
-**媒体连接器** ([media/](../vllm/multimodal/media/)):
-- 统一的媒体加载和处理接口
-- 支持本地文件、URL、base64等格式
-
-**编码器预算管理** ([encoder_budget.py](../vllm/multimodal/encoder_budget.py)):
-- 控制多模态编码器的资源使用
-- token预算分配
-
-### 3.12 🎲 采样系统 (`vllm/v1/sample/`)
-
-**位置**: [v1/sample/](../vllm/v1/sample/)
-
-#### 3.12.1 采样器 - [`Sampler`](../vllm/v1/sample/sampler.py)
-
-**采样算法**:
-- Greedy decoding
-- Beam search
-- Top-k sampling
-- Top-p (nucleus) sampling
-- Min-p sampling
-- Temperature scaling
-- Repetition penalty
-- Frequency penalty
-- Presence penalty
-
-#### 3.12.2 Logits处理器 ([logits_processor/](../vllm/v1/sample/logits_processor/))
-
-**内置处理器**:
-- `bad_words.py` - 禁止词过滤
-- `logit_bias.py` - Logit偏置
-- `penalties.py` - 惩罚项应用
-- `min_p.py` - Min-P采样
-- `prompt_logprob.py` - 提示词对数概率
-- `gumbel.py` - Gumbel噪声
-- `logprob.py` - 对数概率计算
-
-#### 3.12.3 采样操作 ([ops/](../vllm/v1/sample/ops/))
-
-**高性能实现**:
-- `topk_topp_sampler.py` - Python实现
-- `topk_topp_triton.py` - Triton GPU加速实现
-
-### 3.13 🔮 推测解码 (`vllm/v1/spec_decode/`)
-
-**位置**: [v1/spec_decode/](../vllm/v1/spec_decode/)
-
-**推测解码方法**:
-- **N-gram** - N-gram草案模型 ([ngram_proposer.py](../vllm/v1/spec_decode/ngram_proposer.py), [ngram_proposer_gpu.py](../vllm/v1/spec_decode/ngram_proposer_gpu.py))
-- **EAGLE** - EAGLE加速器 ([eagle.py](../vllm/v1/spec_decode/eagle.py))
-- **Medusa** - Medusa头 ([medusa.py](../vllm/v1/spec_decode/medusa.py))
-- **Suffix Decoding** - 后缀解码 ([suffix_decoding.py](../vllm/v1/spec_decode/suffix_decoding.py))
-- **DFlash** - DFlash推测解码 ([dflash.py](../vllm/v1/spec_decode/dflash.py))
-- **Draft Model** - 通用草稿模型接口 ([draft_model.py](../vllm/v1/spec_decode/draft_model.py))
-
-**验证机制**:
-- Rejection Sampling - 拒绝采样验证
-- 典型接受率: 60-80%
-
-### 3.14 📝 结构化输出 (`vllm/v1/structured_output/`)
-
-**位置**: [v1/structured_output/](../vllm/v1/structured_output/)
-
-**后端实现**:
-- **xgrammar** ([backend_xgrammar.py](../vllm/v1/structured_output/backend_xgrammar.py)) - 高性能语法约束
-- **outlines** ([backend_outlines.py](../vllm/v1/structured_output/backend_outlines.py)) - 基于FSM的约束
-- **lm-format-enforcer** ([backend_lm_format_enforcer.py](../vllm/v1/structured_output/backend_lm_format_enforcer.py)) - 轻量级格式强制
-- **guidance** ([backend_guidance.py](../vllm/v1/structured_output/backend_guidance.py)) - Guidance库集成
-
-**支持的结构**:
-- JSON Schema
-- 正则表达式
-- Grammar (EBNF/CFG)
-- 选择约束 (Choice)
-- 工具调用格式
-
-### 3.15 📊 监控与指标 (`vllm/v1/metrics/`)
-
-**位置**: [v1/metrics/](../vllm/v1/metrics/)
-
-**指标收集**:
-- [`perf.py`](../vllm/v1/metrics/perf.py) - 性能指标（延迟、吞吐量、GPU利用率）
-- [`stats.py`](../vllm/v1/metrics/stats.py) - 统计数据（迭代统计、前缀缓存统计）
-- [`prometheus.py`](../vllm/v1/metrics/prometheus.py) - Prometheus导出
-- [`reader.py`](../vllm/v1/metrics/reader.py) - 指标读取接口
-
-**日志系统**:
-- [`loggers.py`](../vllm/v1/metrics/loggers.py) - 日志工厂
-- [`ray_wrappers.py`](../vllm/v1/metrics/ray_wrappers.py) - Ray日志适配
+### 3.3 v0 vs v1 核心差异
+
+| 维度 | v0 架构 | v1 架构 |
+|------|---------|---------|
+| **引擎位置** | `engine/llm_engine.py` | `v1/engine/llm_engine.py` + `v1/engine/core.py` |
+| **调度器位置** | `core/scheduler.py` | `v1/core/sched/scheduler.py` |
+| **进程模型** | 单进程为主 | 支持 Uniproc / Multiproc / Ray / DP |
+| **通信方式** | 直接方法调用 | ZMQ IPC（`msgpack` 序列化） |
+| **调度模式** | 同步调度 | 支持同步 + 异步调度（Async Scheduling） |
+| **KV Cache 管理** | CacheEngine | `v1/core/kv_cache_manager.py` + Hybrid Manager |
+| **Speculative Decode** | 内嵌于 Scheduler | `v1/spec_decode/` 独立模块化 |
+| **DP 支持** | 不支持 | 原生 Data Parallel + Elastic EP |
 
 ---
 
-## 4. 关键技术特性
+## 四、目录结构全景图
 
-### 4.1 PagedAttention ⭐⭐⭐
-
-**核心创新** - 类似操作系统虚拟内存的KV缓存管理：
-
-**传统问题**:
-- KV缓存内存碎片化严重
-- 内存浪费（预留最大序列长度）
-- 无法动态调整
-
-**PagedAttention解决方案**:
-```python
-# 将KV缓存划分为固定大小的blocks（类似页）
-BLOCK_SIZE = 16  # 每个block存储16个token的KV
-
-# 逻辑地址 → 物理地址映射
-BlockTable: {
-    request_1: [block_5, block_12, block_3, ...],
-    request_2: [block_8, block_1, block_20, ...],
-}
-
-# 物理内存池
-BlockPool: [block_0, block_1, ..., block_N]  # 可动态分配和回收
-```
-
-**优势**:
-- ✅ 内存共享（Memory Sharing）- 相同前缀的请求可共享blocks（如beam search、parallel sampling）
-- ✅ 内存高效 - 无内部碎片
-- ✅ 动态分配 - 按需分配，非预分配
-- ✅ 高利用率 - 典型2-4x内存节省
-
-**实现位置**:
-- Python: [v1/core/kv_cache_manager.py](../vllm/v1/core/kv_cache_manager.py)
-- CUDA: [csrc/attention/paged_attention_v1.cu](../csrc/attention/paged_attention_v1.cu), [paged_attention_v2.cu](../csrc/attention/paged_attention_v2.cu)
-- Triton: [v1/attention/ops/paged_attn.py](../vllm/v1/attention/ops/paged_attn.py)
-
-### 4.2 Continuous Batching
-
-**持续批处理** - 动态请求调度：
-
-```python
-# 传统静态批处理：
-Batch 1: [req1, req2, req3] → 等待全部完成 → Batch 2: [req4, req5]
-
-# Continuous Batching：
-Step 1: [req1(prefill), req2(decode)]
-Step 2: [req1(decode), req2(decode), req3(prefill)]  # 新请求随时加入
-Step 3: [req1(decode), req2(done), req3(decode), req4(prefill)]
-```
-
-**优势**:
-- 降低首token延迟（TTFT）
-- 提高GPU利用率
-- 更好的用户体验
-
-### 4.3 Chunked Prefill
-
-**分块预填充** - 将长prompt分割为小块：
-
-```python
-# 传统：一次性处理整个prompt（可能导致OOM）
-# Chunked Prefill：分成多个chunk
-Chunk 1: tokens[0:1024]
-Chunk 2: tokens[1024:2048]
-...
-Chunk N: tokens[(N-1)*1024:]
-```
-
-**实现**: [v1/attention/ops/chunked_prefill_paged_decode.py](../vllm/v1/attention/ops/chunked_prefill_paged_decode.py)
-
-### 4.4 Prefix Caching
-
-**前缀缓存** - 自动识别和缓存公共前缀：
-
-```python
-# 请求1: "Translate the following English to French:"
-# 请求2: "Translate the following English to Spanish:"
-# 公共前缀: "Translate the following English to " → 只计算一次！
-```
-
-**实现**:
-- 调度器集成: [v1/core/sched/scheduler.py](../vllm/v1/core/sched/scheduler.py)
-- 指标收集: [v1/metrics/stats.py](../vllm/v1/metrics/stats.py) (PrefixCacheStats)
-
-### 4.5 CUDA Graphs优化
-
-**CUDA图** - 减少CPU开销：
-
-**两种模式**:
-1. **Piecewise CUDAGraphs** - 子图捕获（推荐）
-   - 按层捕获小图
-   - 灵活性高
-   
-2. **Full CUDAGraphs** - 整体捕获
-   - 捕获整个前向传播
-   - 最高性能但灵活性低
-
-**实现**: [compilation/cuda_graph.py](../vllm/compilation/cuda_graph.py)
-
-### 4.6 torch.compile集成
-
-**PyTorch 2.x编译** - Dynamo + Inductor：
-
-```python
-# 使用torch.compile编译模型
-compiled_model = torch.compile(model, mode="reduce-overhead")
-
-# vLLM的自定义op注册
-@torch.library.custom_op("vllm::rms_norm", mutates_args={})
-def rms_norm(input, weight, eps): ...
-```
-
-**配置**: [config/compilation.py](../vllm/config/compilation.py)
-
-### 4.7 量化支持
-
-**广泛的量化方案**:
-
-| 方法 | 精度 | 权重 | 激活 | 用途 |
-|------|------|------|------|------|
-| FP8 | 8-bit浮点 | ✓ | ✓ | H100/B200原生支持 |
-| MXFP8/MXFP4 | 块缩放浮点 | ✓ | ✓ | 高压缩率 |
-| NVFP4 | 4-bit浮点 | ✓ | ✓ | Blackwell优化 |
-| INT8 | 8-bit整数 | ✓ | ✗ | 通用量化 |
-| INT4 | 4-bit整数 | ✓ | ✗ | 高压缩率 |
-| GPTQ | 4-bit整数 | ✓ | ✗ | 训练后量化 |
-| AWQ | 4-bit整数 | ✓ | ✗ | 激活感知量化 |
-| GGUF | 混合 | ✓ | ✗ | llama.cpp兼容 |
-
-**实现位置**:
-- 配置: [model_executor/layers/quantization/](../vllm/model_executor/layers/quantization/)
-- CUDA kernels: [csrc/quantization/](../csrc/quantization/)
-- 线性层: [model_executor/kernels/linear/](../vllm/model_executor/kernels/linear/)
-
-### 4.8 LoRA (Low-Rank Adaptation)
-
-**高效微调适配**:
-- 动态LoRA加载/卸载
-- 多LoRA并发服务
-- 最大支持数千个adapter
-
-**实现**: [lora/](../vllm/lora/)
-
----
-
-## 5. 执行流程
-
-### 5.1 请求生命周期
+以下是 `/workspace/vllm` 的主要目录树及其职责说明：
 
 ```
-用户请求
-    ↓
-[1. API Layer]
-    OpenAI/Anthropic API接收请求
-    参数解析和验证
-    ↓
-[2. Entry Points]
-    LLM.generate() / LLM.chat()
-    SamplingParams构建
-    Prompt处理（tokenization）
-    ↓
-[3. Engine Layer]
-    InputProcessor: EngineInput → EngineCoreRequest
-    ↓
-[4. Scheduler]
-    RequestQueue: 排队等待
-    Scheduler.schedule(): 
-      - 选择prefill/decode请求
-      - 分配KV缓存blocks
-      - 构建SchedulerOutput
-    ↓
-[5. Executor]
-    Worker.execute_model():
-      - 准备input batch
-      - ModelRunner.forward():
-        * Embedding lookup
-        * Transformer layers (with attention)
-        * LM head
-      - Sampler.sample(): 采样
-      - 写回KV缓存
-    ↓
-[6. Output Processing]
-    OutputProcessor: EngineCoreOutput → RequestOutput
-    Detokenization (token → text)
-    ↓
-[7. Response]
-    流式/非流式返回给用户
-```
-
-### 5.2 典型推理迭代
-
-```python
-# 伪代码展示单次迭代的执行流程
-def step(engine_core, scheduler, worker):
-    # 1. 获取新的请求
-    new_requests = engine_core.get_new_requests()
-    
-    # 2. 调度
-    scheduler_output = scheduler.schedule(
-        running_requests=new_requests,
-        finished_requests=...,
-        kv_cache=worker.kv_cache,
-    )
-    
-    # 3. 如果没有工作要做，跳过
-    if not scheduler_output.has_work():
-        return None
-    
-    # 4. 执行模型
-    model_output = worker.execute_model(
-        model_input=scheduler_output.to_model_input(),
-    )
-    
-    # 5. 采样
-    sample_output = sampler.sample(
-        logits=model_output.logits,
-        sampling_params=scheduler_output.sampling_params,
-    )
-    
-    # 6. 更新调度器状态
-    scheduler.update_from_outputs(
-        model_output=model_output,
-        sample_output=sample_output,
-    )
-    
-    # 7. 返回结果
-    return build_response(sample_output)
-```
-
-### 5.3 多模态处理流程
-
-```
-多媒体输入 (image/audio/video)
-    ↓
-Multimodal Registry: 识别输入类型
-    ↓
-Media Connector: 加载媒体文件
-    ↓
-Processor (CLIP/Whisper/AudioEncoder):
-    提取特征
-    转换为token embeddings
-    ↓
-Encoder Budget Management:
-    控制特征token数量
-    ↓
-Image/Audio Embeddings + Text Tokens
-    ↓
-合并后的输入 → 标准推理流程
+vllm/                              # 项目根目录
+├── __init__.py                    # 包入口：MODULE_ATTRS + __getattr__ 延迟导入
+├── version.py / _version.py       # 版本号管理
+├── envs.py                        # 环境变量集中定义
+├── env_override.py                # 环境变量覆盖机制
+│
+├── config/                         # 🔧 配置体系（20+ 子配置聚合）
+│   ├── vllm.py                    # VllmConfig：全局配置聚合容器（Pydantic model）
+│   ├── model.py                   # ModelConfig：模型名称、架构、dtype、量化
+│   ├── cache.py                   # CacheConfig：KV Cache 大小、block_size、prefix caching
+│   ├── parallel.py                # ParallelConfig：TP/PP/DP/EP 并行配置
+│   ├── scheduler.py               # SchedulerConfig：调度策略、max_num_seqs/tokens
+│   ├── device.py                  # DeviceConfig：设备类型（cuda/xpu/cpu）
+│   ├── load.py                    # LoadConfig：权重加载格式、下载路径
+│   ├── attention.py               # AttentionConfig：注意力后端选择
+│   ├── lora.py                    # LoRAConfig：LoRA 适配器配置
+│   ├── speculative.py             # SpeculativeConfig：推测解码配置
+│   ├── compilation.py             # CompilationConfig：torch.compile + CUDAGraph
+│   ├── kernel.py                  # KernelConfig：自定义算子优先级
+│   ├── quantization/              # 各量化方案的配置（AWQ/GPTQ/FP8 等）
+│   └── ...                        # reasoning/offload/profiler/observability 等
+│
+├── engine/                         # 🚀 引擎层（v0 兼容入口）
+│   ├── llm_engine.py              # LLMEngine → v1 LLMEngine 的别名重定向
+│   ├── async_llm_engine.py        # AsyncLLMEngine 异步引擎
+│   ├── arg_utils.py               # EngineArgs / AsyncEngineArgs 参数解析
+│   └── protocol.py                # 引擎协议定义
+│
+├── v1/                            # 🆕 V1 架构（当前主力架构）
+│   ├── engine/                    # 引擎核心
+│   │   ├── llm_engine.py          # LLMEngine：对外总控接口
+│   │   ├── core.py                # EngineCore：引擎内核（调度+执行主循环）
+│   │   ├── core_client.py         # EngineCoreClient：内核客户端（IPC 代理）
+│   │   ├── async_llm.py           # AsyncLLMEngine：异步引擎
+│   │   ├── coordinator.py         # DPCoordinator：数据并行协调器
+│   │   ├── input_processor.py     # InputProcessor：请求预处理
+│   │   ├── output_processor.py    # OutputProcessor：响应后处理
+│   │   ├── detokenizer.py         # Detokenizer：流式反 Tokenize
+│   │   ├── tensor_ipc.py          # TensorIpcReceiver：张量跨进程传输
+│   │   └── utils.py               # 引擎工具类
+│   │
+│   ├── core/                      # 调度核心
+│   │   ├── sched/                 # 调度器
+│   │   │   ├── scheduler.py       # Scheduler：FIFO/双调度的核心实现
+│   │   │   ├── interface.py       # SchedulerInterface：调度器抽象接口
+│   │   │   ├── async_scheduler.py # AsyncScheduler：异步调度器
+│   │   │   ├── request_queue.py   # RequestQueue：请求排队与优先级
+│   │   │   └── output.py          # SchedulerOutput：调度输出数据结构
+│   │   ├── kv_cache_manager.py    # KV Cache 管理器
+│   │   ├── kv_cache_coordinator.py# KV Cache 跨节点协调器
+│   │   ├── block_pool.py          # Block 内存池管理
+│   │   └── encoder_cache_manager.py # 编码器缓存管理
+│   │
+│   ├── executor/                  # 执行器（分布式策略）
+│   │   ├── abstract.py            # Executor：执行器抽象基类
+│   │   ├── uniproc_executor.py    # UniprocExecutor：单进程执行器
+│   │   ├── multiproc_executor.py  # MultiprocExecutor：多进程执行器
+│   │   ├── ray_executor.py        # RayExecutor：Ray 部署执行器
+│   │   └── ray_executor_v2.py     # RayExecutorV2：Ray 执行器 v2
+│   │
+│   ├── worker/                    # 模型执行器（Worker）
+│   │   ├── worker_base.py         # WorkerBase：Worker 抽象基类
+│   │   ├── gpu_worker.py          # GPUWorker：GPU Worker
+│   │   ├── cpu_worker.py          # CPUWorker：CPU Worker
+│   │   ├── gpu_model_runner.py    # GPUModelRunner：GPU 模型前向传播
+│   │   ├── cpu_model_runner.py    # CPUModelRunner：CPU 模型前向传播
+│   │   ├── gpu_input_batch.py     # GPUInputBatch：GPU 输入批次封装
+│   │   ├── gpu_ubatch_wrapper.py  # UBatchWrapper：Micro-batch 封装
+│   │   ├── ubatching.py           # Micro-batching 调度逻辑
+│   │   ├── block_table.py         # Block Table 管理
+│   │   ├── workspace.py           # 工作空间（显存分配）
+│   │   ├── lora_model_runner_mixin.py   # LoRA 模型适配
+│   │   ├── kv_connector_model_runner_mixin.py  # KV 连接器适配
+│   │   └── encoder_cudagraph.py   # 编码器 CUDA Graph
+│   │
+│   ├── spec_decode/               # 推测解码
+│   │   ├── eagle.py               # EAGLE 推测解码
+│   │   ├── medusa.py              # MEDUSA 推测解码
+│   │   ├── ngram_proposer.py      # N-Gram 草稿模型
+│   │   ├── draft_model.py         # Draft Model 管理
+│   │   └── ...
+│   │
+│   ├── structured_output/         # 结构化输出
+│   │   ├── backend_outlines.py    # Outlines 后端
+│   │   ├── backend_lm_format_enforcer.py  # LMFEnforcer 后端
+│   │   ├── backend_xgrammar.py    # XGrammar 后端
+│   │   └── backend_guidance.py    # Guidance 后端
+│   │
+│   ├── sample/                    # 采样模块
+│   │   ├── sampler.py             # 采样器（softmax/top-k/top-p）
+│   │   ├── rejection_sampler.py   # 拒绝采样（Speculative Decode 用）
+│   │   └── metadata.py            # 采样元数据
+│   │
+│   ├── metrics/                   # 可观测性指标
+│   │   ├── stats.py               # 统计数据结构
+│   │   ├── prometheus.py          # Prometheus 指标导出
+│   │   ├── loggers.py             # 日志记录器
+│   │   └── perf.py                # 性能计数器
+│   │
+│   ├── attention/                 # 注意力后端选择
+│   │   ├── backend.py             # 后端枚举与选择逻辑
+│   │   └── selector.py            # 选择器实现
+│   │
+│   ├── kv_offload/                # KV Cache 卸载
+│   │   └── simple_kv_offload/     # 简单 KV 卸载实现
+│   │
+│   ├── outputs.py                 # ModelRunnerOutput 等输出数据结构
+│   ├── request.py                 # Request / RequestStatus 数据结构
+│   ├── kv_cache_interface.py      # KVCacheConfig 接口定义
+│   └── cudagraph_dispatcher.py    # CUDA Graph 分发器
+│
+├── model_executor/                 # 🤖 模型执行框架
+│   ├── models/                    # 200+ 模型架构实现
+│   │   ├── llama.py               # LLaMA 系列
+│   │   ├── deepseek_v2.py         # DeepSeek-V2/V3 (MLA)
+│   │   ├── qwen3.py               # Qwen3 系列
+│   │   ├── mistral.py             # Mistral 系列
+│   │   ├── gpt_neox.py            # GPT-NeoX
+│   │   ├── interfaces.py          # 模型接口抽象（ForCausalLM 等）
+│   │   ├── interfaces_base.py     # 基础接口定义
+│   │   ├── registry.py            # ModelRegistry：模型注册表
+│   │   └── ...                    # 其余 170+ 模型文件
+│   ├── custom_op.py               # 自定义算子注册与管理
+│   ├── parameter.py               # 参数管理（sharding 等）
+│   ├── utils.py                   # 模型工具函数
+│   └── warmup/                    # 模型预热（kernel warmup）
+│
+├── multimodal/                     # 🖼️ 多模态支持
+│   ├── registry.py                # MultiModalRegistry：多模态注册中心
+│   ├── image.py / audio.py / video.py  # 各模态输入处理
+│   ├── processing/                # 处理流水线
+│   │   ├── processor.py           # 处理器基类
+│   │   ├── inputs.py              # 输入数据结构
+│   │   └── context.py             # 处理上下文
+│   ├── media/                     # 媒体类型定义
+│   ├── cache.py                   # 多模态特征缓存
+│   └── hasher.py                  # 输入哈希（用于缓存 key）
+│
+├── lora/                          # 🔗 LoRA 适配器系统
+│   ├── lora_model.py              # LoRA 模型管理
+│   ├── lora_weights.py            # LoRA 权重管理
+│   ├── model_manager.py           # LoRA 模型管理器
+│   ├── layers/                    # LoRA 层实现
+│   │   ├── base.py                # LoRA 层基类
+│   │   ├── column_parallel_linear.py  # 列并行线性层+LoRA
+│   │   ├── row_parallel_linear.py     # 行并行线性层+LoRA
+│   │   └── fused_moe.py           # MoE + LoRA 融合
+│   ├── punica_wrapper/            # Punica GPU 库封装（高效 LoRA 计算）
+│   └── request.py                 # LoRARequest 请求数据
+│
+├── distributed/                   # 🌐 分布式通信
+│   ├── parallel_state.py          # 并行状态（TP/PP/DP group 管理）
+│   ├── device_communicators/      # 设备通信后端
+│   │   ├── base_device_communicator.py  # 通信基类
+│   │   ├── cuda_communicator.py         # CUDA 通信（NCCL/PYNCLL）
+│   │   ├── custom_all_reduce.py          # 自定义 AllReduce
+│   │   ├── flashinfer_all_reduce.py      # FlashInfer AllReduce
+│   │   └── all2all.py                     # All2All 通信
+│   ├── kv_transfer/               # KV Cache 跨节点传输
+│   │   └── kv_connector/          # KV 连接器工厂与实现
+│   ├── elastic_ep/                # 弹性并行（Elastic EP）
+│   │   ├── elastic_state.py       # 弹性状态机
+│   │   └── elastic_execute.py     # 弹性执行逻辑
+│   ├── weight_transfer/           # 权重传输（RLHF 训练场景）
+│   └── stateless_coordinator.py   # 无状态协调器
+│
+├── entrypoints/                    # 🌐 服务入口
+│   ├── llm.py                     # LLM 类（面向用户的 Python SDK）
+│   ├── api_server.py              # API Server 主入口
+│   ├── openai/                    # OpenAI 兼容服务
+│   │   ├── api_server.py          # OpenAI API Server
+│   │   └── cli_args.py            # OpenAI CLI 参数
+│   ├── anthropic/                 # Anthropic 兼容服务
+│   ├── cli/                       # 命令行入口
+│   │   ├── main.py                # vllm 命令入口
+│   │   └── serve.py               # vllm serve 命令
+│   ├── pooling/                   # Pooling 任务（embedding/classification）
+│   └── mcp/                       # MCP (Model Context Protocol) 支持
+│
+├── compilation/                    # ⚡ 编译优化体系
+│   ├── compiler_interface.py      # torch.compile 接口封装
+│   ├── backends.py                # 编译后端选择
+│   ├── cuda_graph.py              # CUDA Graph 捕获与管理
+│   ├── piecewise_backend.py       # Piecewise CUDA Graph 后端
+│   ├── base_static_graph.py       # 静态图基础
+│   ├── decorators.py              # @support_torch_compile 装饰器
+│   ├── counter.py                 # 编译计数器
+│   ├── caching.py                 # 编译结果缓存
+│   ├── codegen.py                 # 代码生成
+│   ├── wrapper.py                 # 编译包装器
+│   └── passes/                    # 编译优化 Pass
+│       ├── pass_manager.py        # Pass 管理器
+│       ├── inductor_pass.py       # Inductor Pass
+│       ├── vllm_inductor_pass.py  # vLLM 自定义 Inductor Pass
+│       └── fx_utils.py            # FX 图工具
+│
+├── kernels/                        # 🔺 自定义算子内核
+│   ├── __init__.py / vllm_c.c     # C++/CUDA 扩展入口
+│   ├── aiter_ops.py               # AITer 算子（ROCm 平台）
+│   ├── xpu_ops.py                 # Intel XPU 算子
+│   ├── oink_ops.py                # Oink 算子
+│   ├── triton/                    # Triton 自定义内核
+│   └── helion/                    # Helion 配置
+│
+├── tokenizers/                     # 📝 Tokenizer 系统
+│   ├── hf.py                      # HuggingFace Tokenizer
+│   ├── registry.py                # TokenizerRegistry
+│   ├── fastokens.py               # FastTokenizer
+│   └── ...                        # 特殊 tokenizer（DeepSeek/Grok/Qwen-VL 等）
+│
+├── renderers/                      # 🎨 输入渲染器（Prompt 构建）
+│   ├── base.py                    # 渲染器基类
+│   ├── hf.py                      # HuggingFace 渲染器
+│   ├── registry.py                # 渲染器注册表
+│   ├── deepseek_v32.py            # DeepSeek-V3/V32 特殊渲染
+│   └── ...
+│
+├── reasoning/                      # 🧠 推理（Reasoning）解析
+│   ├── abs_reasoning_parsers.py   # 解析器抽象基类
+│   ├── deepseek_r1_reasoning_parser.py  # DeepSeek-R1 推理解析
+│   └── ...                        # 其他模型的推理解析器
+│
+├── tool_parsers/                   # 🔧 工具调用（Function Calling）解析
+│   ├── abstract_tool_parser.py    # 工具解析器基类
+│   ├── openai_tool_parser.py      # OpenAI 格式解析
+│   └── ...                        # 各厂商工具调用解析
+│
+├── platforms/                      # 💻 平台抽象层
+│   ├── interface.py               # 平台接口定义
+│   ├── cuda.py                    # NVIDIA CUDA 平台
+│   ├── rocm.py                    # AMD ROCm 平台
+│   ├── xpu.py                     # Intel XPU 平台
+│   ├── cpu.py                     # CPU 平台
+│   └── tpu.py                     # Google TPU 平台
+│
+├── transformers_utils/             # 🔄 Transformers 工具
+│   ├── config.py                  # HF Config 工具
+│   ├── tokenizer.py               # Tokenizer 工具
+│   ├── configs/                   # 各模型 HF Config 映射
+│   └── processors/                # 图像处理器映射
+│
+├── inputs/                         # 📥 输入处理
+│   ├── __init__.py                # PromptType, TextPrompt, TokensPrompt
+│   ├── engine.py                  # EngineInput 数据结构
+│   ├── llm.py                     # LLM 输入数据结构
+│   └── preprocess.py              # 预处理管道
+│
+├── outputs/                        # 📤 输出数据结构
+│   ├── __init__.py                # RequestOutput, CompletionOutput 等
+│   └── ...
+│
+├── utils/                          # 🛠️ 通用工具库
+│   ├── torch_utils.py             # PyTorch 工具
+│   ├── mem_utils.py               # 内存管理工具
+│   ├── hashing.py                 # 哈希工具（用于 prefix caching）
+│   ├── serial_utils.py            # 序列化工具（msgpack）
+│   ├── network_utils.py           # 网络/ZMQ 工具
+│   ├── profiler.py                # 性能分析工具
+│   └── ...
+│
+├── benchmarks/                     # 📊 性能基准测试
+├── profiler/                       # 📈 层级性能分析器
+├── tracing/                        # 🔍 OpenTelemetry 集成
+├── logging_utils/                  # 日志工具
+├── plugins/                        # 插件系统
+├── device_allocator/               # 设备内存分配器（CuMem）
+├── parser/                         # 输出解析器
+├── usage/                          # 使用统计
+├── assets/                         # 静态资源
+├── third_party/                    # 第三方依赖
+├── ir/                            # 中间表示（IR）
+└── csrc/                           # C++/CUDA 源码
 ```
 
 ---
 
-## 6. 代码组织与设计模式
+## 五、快速导航索引
 
-### 6.1 设计模式
+以下表格链接到本系列的其余 21 个分模块文档，按推荐阅读顺序排列：
 
-#### 6.1.1 策略模式 (Strategy Pattern)
-**应用场景**: 注意力后端、线性层后端、量化方法
+| 序号 | 文档名 | 文件路径 | 核心内容 | 建议阅读顺序 |
+|:----:|--------|----------|----------|:------------:|
+| 01 | 架构总览 | `01_architecture_overview.md` | 六层架构、v0→v1演进、核心数据结构、设计原则 | 第 1 篇 |
+| 02 | 配置系统 | `02_config_system.md` | VllmConfig 及 20+ 子配置、环境变量覆盖、OptimizationLevel O0-O3 | 第 2 篇 |
+| 03 | 引擎核心 | `03_engine_core.md` | LLMEngine / AsyncLLM / EngineCore / InputProcessor / OutputProcessor | 第 3 篇 |
+| 04 | 调度器 | `04_scheduler.md` | Scheduler.schedule() 完整逻辑、Continuous Batching、Chunked Prefill、抢占机制 | 第 4 篇 |
+| 05 | PagedAttention | `05_pagedattention.md` | 页式 KV Cache 管理、BlockPool/BlockTable、Copy-on-Write、Prefix Caching | 第 5 篇 |
+| 06 | 注意力后端 | `06_attention_backends.md` | FlashAttention / FlashInfer / MLA / Triton / ROCm / CPU 后端选择与实现 | 第 6 篇 |
+| 07 | 模型执行器 | `07_model_executor.md` | ModelRegistry（200+ 模型）、模型接口、主要模型家族、Transformer 层组件 | 第 7 篇 |
+| 08 | Worker 与执行器 | `08_worker_and_executor.md` | UniProc/MultiProc/Ray Executor、WorkerBase/GPUWorker/GPUModelRunner | 第 8 篇 |
+| 09 | KV 缓存系统 | `09_kv_cache.md` | KVCacheManager 层次、Offload/Transfer/Prefix Caching、Block Table 管理 | 第 9 篇 |
+| 10 | 采样系统 | `10_sampling.md` | SamplingParams / Sampler 核心 / RejectionSampler / ParallelSampling / Logprobs | 第 10 篇 |
+| 11 | 多模态处理 | `11_multimodal.md` | MultiModalRegistry、图像/音频/视频管线、CLIP/SigLIP/Whisper 编码器 | 第 11 篇 |
+| 12 | 量化支持 | `12_quantization.md` | FP8 / INT4 / GPTQ / AWQ / GGUF / NVFP4 / Marlin / Machete 量化方案 | 第 12 篇 |
+| 13 | 分布式计算 | `13_distributed.md` | TP / PP / DP / EP 并行策略、通信原语、Elastic EP / EPLB | 第 13 篇 |
+| 14 | LoRA 系统 | `14_lora.md` | LoRA Layer 实现、Punica Wrapper、动态加载/卸载、Resolver 解析 | 第 14 篇 |
+| 15 | API 服务层 | `15_api_layer.md` | OpenAI / Anthropic / gRPC API、Batch Serving、MCP Tool Server、Pooling | 第 15 篇 |
+| 16 | CUDA 内核 | `16_cuda_kernels.md` | 注意力/缓存/激活/量化/MoE/通信/采样内核、CPU/ROCm 平台内核 | 第 16 篇 |
+| 17 | 编译优化 | `17_compilation_and_optimization.md` | torch.compile / CUDA Graphs (Piecewise+Full) / Inductor Passes / Triton Utils | 第 17 篇 |
+| 18 | 结构化输出 | `18_structured_output.md` | xgrammar / outlines / lm-format-enforcer / guidance 四种后端实现 | 第 18 篇 |
+| 19 | 推测解码 | `19_speculative_decode.md` | EAGLE / Medusa / N-gram / DFlash / Suffix Decoding / Gemma4 草稿方法 | 第 19 篇 |
+| 20 | 监控指标 | `20_metrics_and_monitoring.md` | Prometheus 指标 / 日志系统 / OpenTelemetry / Profiling (Kineto/NVTX) | 第 20 篇 |
+| 21 | 设计模式 | `21_design_patterns.md` | 9 种设计模式、可扩展性设计、性能优化策略、竞品对比与未来方向 | 第 21 篇 |
 
-```python
-# 注意力后端选择
-class AttentionBackendSelector:
-    def select(self, config) -> AttentionBackend:
-        if config.use_flash_attn:
-            return FlashAttentionBackend()
-        elif config.use_flashinfer:
-            return FlashInferBackend()
-        elif config.is_rocm:
-            return ROCmAttentionBackend()
-        # ...
+> 💡 **阅读路径建议**：
+> - **快速上手路径**：01 → 02 → 07 → 15（了解如何从配置到 API 调用）
+> - **深度研究路径**：01 → 03 → 04 → 05 → 06 → 07 → 08 → 12（深入理解核心算法）
+> - **工程实践路径**：01 → 07 → 14 → 15 → 18 → 20（关注功能集成与运维）
+
+---
+
+## 六、关键技术特性一览表
+
+| 特性名 | 核心位置 | 原理一句话 | 影响一句话 |
+|--------|----------|-----------|-----------|
+| **PagedAttention** | `v1/core/block_pool.py`, `v1/core/kv_cache_manager.py` | 将 KV Cache 按固定大小 Block 分页存储，类似 OS 虚拟内存管理 | 将 GPU 显存利用率从 ~20% 提升至 ~90%+，支持更大并发量 |
+| **Continuous Batching** | `v1/core/sched/scheduler.py` | 每个 iteration 动态混排 prefill 和 decode 请求，消除 batch 边界等待 | 将 TTFT（首字延迟）和 TPOT（每词延迟）同时优化到极致 |
+| **Chunked Prefill** | `v1/core/sched/scheduler.py` | 将长 prompt 拆分为多个 chunk 分批处理，避免长请求阻塞短请求 | 保证短请求的延迟 SLA，提升整体公平性和吞吐 |
+| **Prefix Caching** | `v1/core/kv_cache_manager.py` | 对相同前缀的请求复用已计算的 KV Cache Block | 对重复前缀场景（如 system prompt）实现接近零开销 |
+| **CUDA Graphs** | `compilation/cuda_graph.py`, `v1/cudagraph_dispatcher.py` | 捕获 kernel 执行图为可重放对象，消除 Python/CUDA launch 开销 | decode 阶段延迟降低 50%+，高吞吐场景收益显著 |
+| **torch.compile** | `compilation/compiler_interface.py`, `compilation/passes/` | 通过 TorchDynamo + Inductor 对模型进行 JIT 编译和算子融合 | 减少 kernel launch 次数和内存 I/O，融合 Norm/Act/Quant 算子 |
+| **Speculative Decoding** | `v1/spec_decode/` | 用小草案模型（draft model）生成候选 token，大目标模型并行验证 | 在保持完全一致性的前提下，加速 2-4 倍 |
+| **LoRA 动态适配** | `lora/` | 运行时动态注入/卸载 LoRA 适配器权重，共享基础模型 | 单实例服务数百个微调模型，大幅降低部署成本 |
+| **Attention Backend 选择** | `v1/attention/backend.py`, `selector.py` | 根据 GPU 架构和模型特性自动选择最优注意力后端 | 自动适配 FlashInfer/FlashAttention/XFormers 等 |
+| **异步调度（Async Scheduling）** | `v1/core/sched/async_scheduler.py` | 将采样操作与模型前向传播解耦，重叠执行 | 减少每个 iteration 的气泡，提升 GPU 利用率 |
+| **Data Parallel (DP)** | `v1/engine/core.py` (DPEngineCoreProc), `distributed/` | 多副本间通过 all-reduce 协调请求波次（wave），MoE 场景下路由专家 | 线性扩展吞吐量，支持弹性扩缩容 |
+| **Pipeline Parallelism (PP)** | `v1/worker/worker_base.py`, `sequence.py` (IntermediateTensors) | 将模型层切分到多个 GPU，阶段间通过 IntermediateTensors 传递 | 支持超大模型（70B+）在有限 GPU 上部署 |
+| **Tensor Parallelism (TP)** | `model_executor/`, `distributed/device_communicators/` | 将单层矩阵运算切分到多卡，通过 AllReduce 同步 | 减少单卡显存需求，几乎无损的线性加速 |
+| **KV Cache Offload** | `v1/kv_offload/`, `config/kv_transfer.py` | 将不活跃序列的 KV Cache 卸载到 CPU 或远端内存 | 支持超长上下文和超大并发，降低 GPU 显存压力 |
+| **Multi-Modal Support** | `multimodal/` | 统一的输入处理 pipeline，将图像/音频/视频编码为特征向量注入模型 | 一个引擎同时服务文本和多模态任务 |
+| **Structured Output** | `v1/structured_output/` | 通过 grammar bitmask 约束采样过程，保证输出符合 JSON Schema | 实现可靠的工具调用和结构化数据提取 |
+| **Elastic EP (弹性并行)** | `distributed/elastic_ep/` | 运行时动态增减 DP 副本数，无状态协调器管理扩缩容 | 根据负载自动调整资源，云原生场景下降本增效 |
+| **Optimization Levels (-O0~-O3)** | `config/vllm.py` (OPTIMIZATION_LEVEL_*) | 四级预设优化级别，控制编译/CUDAGraph/fusion 的组合 | 用户可在启动速度和推理性能间灵活权衡 |
+| **Hybrid KV Cache Manager** | `v1/core/kv_cache_coordinator.py` | 同时管理 full-attention 和 sliding-window/Mamba 类型 cache | 统一管理混合注意力模型（如 Jamba、Hybrid-Transformer-Mamba） |
+
+---
+
+## 七、数据流总览
+
+以下 Mermaid 图展示了一个 HTTP 请求从接收到返回响应的完整数据流：
+
+```mermaid
+flowchart LR
+    subgraph Client["客户端"]
+        R1["HTTP POST<br/>/v1/completions<br/>或 /v1/chat/completions"]
+    end
+
+    subgraph L6_Entry["服务层 entrypoints/openai/"]
+        R2["OpenAIServing<br/>路由分发"]
+        R3["请求校验 &<br/>参数解析"]
+        R4["构建 RequestOutput<br/>回调 Future"]
+    end
+
+    subgraph L5_Engine["引擎层 v1/engine/"]
+        R5["LLMEngine.add_request()<br/>→ EngineCoreClient.add_request()"]
+        R6["InputProcessor.preprocess()<br/>Tokenize + Multimodal Encode"]
+        R7["EngineCore.step()<br/>调度循环"]
+    end
+
+    subgraph L4_Sched["调度核心 v1/core/sched/"]
+        R8["Scheduler.schedule()<br/>ChunkedPrefill 策略"]
+        R9["Block 分配 &<br/>Copy-on-Write"]
+        R10["构建 SchedulerOutput<br/>→ scheduled_chunks"]
+    end
+
+    subgraph L3_Exec["执行器层 v1/executor/"]
+        R11["Executor.execute_model()<br/>序列化 & 发送"]
+    end
+
+    subgraph L2_Worker["模型执行器 v1/worker/"]
+        R12["GPUModelRunner.execute_model()<br/>输入组装"]
+        R13["模型 Forward<br/>Attention + FFN + ..."]
+        R14["Sampling<br/>softmax → top-k/p → sample"]
+        R15["返回 ModelRunnerOutput<br/>hidden_states + logits"]
+    end
+
+    subgraph L1_Kernel["内核层 kernels/ + compilation/"]
+        R16["FlashInfer Attention<br/>+ CustomOps<br/>+ CUDA Graph"]
+    end
+
+    subgraph ResponsePath["响应回传路径"]
+        R17["scheduler.update_from_output()<br/>更新 KV Cache / 生成 token"]
+        R18["OutputProcessor.process()<br/>组装输出"]
+        R19["Detokenizer.detokenize()<br/>token ID → 文本"]
+        R20["流式 SSE / 非流式 JSON<br/>返回给客户端"]
+    end
+
+    Client -->|"① HTTP Request"| L6_Entry
+    L6_Entry --> R2 --> R3 --> R4
+    R4 -->|"② add_request()"| L5_Engine
+    R5 --> R6
+    R6 -->|"③ EngineCoreRequest (ZMQ/msgpack)"| R7
+    R7 -->|"④ schedule()"| L4_Sched
+    R8 --> R9 --> R10
+    R10 -->|"⑤ SchedulerOutput"| L3_Exec
+    R11 -->|"⑥ execute_model()"| L2_Worker
+    R12 --> R13 --> R14 --> R15
+    R13 -->|"⑦ kernel launch"| L1_Kernel
+    R15 -->|"⑧ ModelRunnerOutput"| L4_Sched
+    L4_Sched -->|"⑨ EngineCoreOutputs"| L5_Engine
+    L5_Engine --> ResponsePath
+    R17 --> R18 --> R19 --> R20
+    R20 -->|"⑩ HTTP Response"| Client
+
+    style Client fill:#e3f2fd,stroke:#1565c0
+    style L6_Entry fill:#fff3e0,stroke:#e65100
+    style L5_Engine fill:#fce4ec,stroke:#c62828
+    style L4_Sched fill:#e8f5e9,stroke:#2e7d32
+    style L3_Exec fill:#f3e5f5,stroke:#7b1fa2
+    style L2_Worker fill:#fffde7,stroke:#f9a825
+    style L1_Kernel fill:#ffebee,stroke:#d32f2f
+    style ResponsePath fill:#e0f2f1,stroke:#00796b
 ```
 
-#### 6.1.2 工厂模式 (Factory Pattern)
-**应用场景**: Executor、Worker、Connector创建
+### 关键数据结构流转
 
-```python
-class Executor:
-    @classmethod
-    def get_class(cls, vllm_config):
-        backend = vllm_config.parallel_config.distributed_executor_backend
-        EXECUTOR_MAP = {
-            "ray": RayExecutorV2,
-            "mp": MultiProcExecutor,
-            "uni": UniProcExecutor,
-        }
-        return EXECUTOR_MAP[backend]
 ```
-
-#### 6.1.3 观察者模式 (Observer Pattern)
-**应用场景**: 指标收集、事件发布
-
-```python
-class EventPublisher:
-    def publish(self, event_type, data):
-        for subscriber in self.subscribers:
-            subscriber.on_event(event_type, data)
-```
-
-#### 6.1.4 注册表模式 (Registry Pattern)
-**应用场景**: 模型注册、多模态处理器、工具解析器
-
-```python
-class ModelRegistry:
-    _registry: Dict[str, Type[Model]] = {}
-    
-    @classmethod
-    def register_model(cls, name):
-        def decorator(model_class):
-            cls._registry[name] = model_class
-            return model_class
-        return decorator
-```
-
-### 6.2 代码分层原则
-
-**清晰的职责分离**:
-- **API层**: 只负责HTTP协议转换
-- **引擎层**: 请求管理和编排
-- **核心层**: 调度和资源管理
-- **执行层**: 实际计算
-- **内核层**: 高性能算子
-
-**接口抽象**:
-- 使用Protocol/ABC定义接口
-- 具体实现可插拔
-- 便于测试和扩展
-
-### 6.3 配置驱动
-
-**高度可配置**:
-- 28个配置模块覆盖所有方面
-- 通过环境变量覆盖
-- 支持YAML/JSON/TOML配置文件
-- 运行时动态调整部分参数
-
-### 6.4 错误处理
-
-**异常层次**:
-```python
-class VllmError(Exception): ...
-class OperationNotSupportedError(VllmError): ...
-class InvalidChatTemplateError(VllmError): ...
-class ValueError(VllmError): ...
-class AssertionError(VllmError): ...
-class InternalServerError(VllmError): ...
-class ServiceUnavailableError(VllmError): ...
-class BadRequestError(VllmError): ...
-class ContextLengthExceeded(VllmError): ...
-class TokenizerError(VllmError): ...
-class InvalidInputError(VllmError): ...
-class UnsupportedModelError(VllmError): ...
-class CompileError(VllmError): ...
-class StructuredOutputError(VllmError): ...
+用户输入 (prompt/text)
+    ↓ InputProcessor.preprocess()
+EngineCoreRequest (request_id, prompt_token_ids, mm_features, sampling_params, ...)
+    ↓ EngineCore.add_request()
+Request (internal, with block_hashes, grammar_state, ...)
+    ↓ Scheduler.schedule()
+SchedulerOutput (num_scheduled_tokens, scheduled_chunks, ...)
+    ↓ Executor.execute_model() → GPUModelRunner.execute_model()
+ModelRunnerOutput (logits, hidden_states, sampled_token_ids, ...)
+    ↓ Scheduler.update_from_output()
+EngineCoreOutputs (outputs per request, finished_requests, ...)
+    ↓ OutputProcessor.process()
+CompletionOutput / RequestOutput (text, token_ids, logprobs, finish_reason, ...)
+    ↓ Detokenizer + SSE/JSON encode
+HTTP Response (流式/非流式)
 ```
 
 ---
 
-## 7. 技术栈与依赖
+## 八、设计哲学总结
 
-### 7.1 核心依赖
+### 8.1 配置驱动（Configuration-Driven）
 
-**Python生态**:
-- **PyTorch** >=2.11.0 - 深度学习框架
-- **FastAPI** - Web框架（API服务器）
-- **pydantic** - 数据验证和设置管理
-- **transformers** - HuggingFace Transformers（模型加载）
-- **tokenizers** - 高性能tokenization
-- **numpy**, **scipy** - 数值计算
-- **asyncio** - 异步编程
-- **cloudpickle** - 序列化（Ray使用）
-- **tqdm** - 进度条
-- **jinja2** - 模板渲染（chat templates）
-- **packaging** - 版本管理
-- **typing_extensions** - 类型注解扩展
+**核心理念**：所有行为通过配置对象驱动，避免硬编码散落各处。
 
-**CUDA/ROCm生态**:
-- **NCCL** - GPU集合通信
-- **FlashAttention** - 高效注意力
-- **FlashInfer** - 推理优化库
-- **CUTLASS** - CUDA模板线性代数库
-- **Triton** - GPU编程语言
-- **cuDNN** - 深度学习原语
+vLLM 的 [`VllmConfig`](file:///workspace/vllm/config/vllm.py#L269-L269) 是一个 Pydantic model，聚合了 **20+ 子配置项**（`ModelConfig`, `CacheConfig`, `ParallelConfig`, `SchedulerConfig`, `CompilationConfig` 等）。每个子配置负责一个维度的决策：
 
-**可选依赖**:
-- **Ray** - 分布式计算框架
-- **Prometheus Client** - 监控指标
-- **OpenTelemetry** - 分布式追踪
-- **Outlines / xgrammar / lm-format-enforcer** - 结构化输出
-- **Pillow / soundfile** - 多模态处理
-- **tensorizer** - 快速权重加载
-- **hf-transfer** - HuggingFace快速下载
+- **为什么这样做**：配置集中使得：
+  - 新增特性只需新增配置字段，无需修改核心逻辑
+  - 配置间的交叉验证集中在 `__post_init__` 中（[`VllmConfig.__post_init__`](file:///workspace/vllm/config/vllm.py#L758-L758) 有 **500+ 行**验证逻辑）
+  - `compute_hash()` 方法基于配置自动计算唯一哈希，用于编译缓存失效判定
+  - 四级优化级别（O0-O3）通过 `OPTIMIZATION_LEVEL_TO_CONFIG` 字典一键切换全部编译选项
 
-### 7.2 构建系统
+### 8.2 注册表模式（Registry Pattern）
 
-**CMake构建** ([CMakeLists.txt](../CMakeLists.txt)):
-- CUDA/C++源码编译
-- 自定义kernel编译
-- 平台特定优化
+**核心理念**：通过全局注册表实现可扩展的组件发现与绑定。
 
-**Python打包** ([setup.py](../setup.py), [pyproject.toml](../pyproject.toml)):
-- setuptools_scm版本管理
-- 可选依赖分组
-- 入口点定义
+vLLM 中广泛使用的注册表包括：
 
-**CI/CD** (.github/workflows/):
-- 多平台测试（Linux, macOS, Windows）
-- 多GPU型号测试（A100, H100, L40S, RTX 4090等）
-- 多精度测试（fp16, bf16, fp8）
-- 代码质量检查（ruff lint, mypy type check）
+| 注册表 | 位置 | 用途 |
+|--------|------|------|
+| `ModelRegistry` | [`model_executor/models/registry.py`](file:///workspace/vllm/model_executor/models/registry.py) | 模型架构 → 实现类的映射 |
+| `MultiModalRegistry` | [`multimodal/registry.py`](file:///workspace/vllm/multimodal/registry.py) | 模态类型 → 处理器的映射 |
+| `TokenizerRegistry` | [`tokenizers/registry.py`](file:///workspace/vllm/tokenizers/registry.py) | 模型 → Tokenizer 实现的映射 |
+| `RendererRegistry` | [`renderers/registry.py`](file:///workspace/vllm/renderers/registry.py) | 模型 → Prompt 渲染器的映射 |
+| `StatLoggerFactory` | [`v1/metrics/loggers.py`](file:///workspace/vllm/v1/metrics/loggers.py) | 日志类型 → Logger 实现的映射 |
+| `Scheduler` 选择 | [`config/scheduler.py`](file:///workspace/vllm/config/scheduler.py) | 配置 → 调度器实现类的映射 |
+| `Executor` 选择 | [`v1/executor/abstract.py`](file:///workspace/vllm/v1/executor/abstract.py) | backend 名称 → 执行器实现类的映射 |
 
-### 7.3 CUDA/C++内核 (`csrc/`)
+**为什么这样做**：第三方开发者可以通过装饰器 `@register_xxx("name")` 注册新组件，**零修改核心代码**即可扩展 vLLM 支持新的模型架构/模态/平台。
 
-**核心内核类别**:
+### 8.3 策略模式（Strategy Pattern）
 
-1. **注意力内核** ([attention/](../csrc/attention/)):
-   - PagedAttention V1/V2 - 分页注意力核心
-   - MLA (Multi-head Latent Attention) - DeepSeek系列专用
-   - 合并注意力状态
-   - 垂直斜线索引
+**核心理念**：将算法族封装为可互换的策略对象。
 
-2. **缓存内核**:
-   - `cache_kernels.cu` - KV缓存读写
-   - `cache_kernels_fused.cu` - 融合缓存操作
-   - `reshape_and_cache` - 重塑和缓存
+典型应用：
 
-3. **激活函数**:
-   - `activation_kernels.cu` - Gelu/SiLU/ReLU
-   - `layernorm_kernels.cu` - RMSNorm/LayerNorm
-   - `pos_encoding_kernels.cu` - RoPE（旋转位置编码）
+- **Attention Backend**：[`v1/attention/backend.py`](file:///workspace/vllm/v1/attention/backend.py) 定义了多种注意力后端（FlashInfer, FlashAttention, RoCmFlashAttn, XFormers 等），根据设备能力和模型需求在运行时选择。
+- **Executor Backend**：[`v1/executor/`](file:///workspace/vllm/v1/executor/) 中 `UniprocExecutor` / `MultiprocExecutor` / `RayExecutor` 互为策略变体，通过 `Executor.get_class(vllm_config)` 工厂方法选择。
+- **KV Cache Manager**：不同类型的模型（full-attn / sliding-window / Mamba / hybrid）使用不同的 KV Cache 管理策略。
+- **Speculative Decode**：[`v1/spec_decode/`](file:///workspace/vllm/v1/spec_decode/) 下 EAGLE / Medusa / N-Gram 等不同推测策略共享统一的验证接口。
 
-4. **量化内核** ([quantization/](../csrc/quantization/)):
-   - **AWQ**: 反量化 + GEMM
-   - **GPTQ**: 量化GEMM（多种精度）
-   - **GGUF**: GGUF格式反量化
-   - **Marlin**: 高性能4-bit量化
-   - **Machete**: 新一代量化内核
-   - **Cutlass extensions**: W8A8 Scaled MM, FP4/NVFP4
+**为什么这样做**：策略可以在运行时切换（甚至通过配置热更新），便于 A/B 测试和渐进式优化。
 
-5. **MoE内核** ([moe/](../csrc/moe/)):
-   - Mixtral-style MoE
-   - TopK路由 + 专家计算
-   - Permute/Unpermute
-   - WNA16 (4-bit MoE)
-   - DSv3路由
-   - MXFP8 MoE
+### 8.4 关注点分离（Separation of Concerns）
 
-6. **通信内核**:
-   - `custom_all_reduce.cu` - 自定义AllReduce
-   - `custom_quick_reduce.cu` - 快速归约
-   - `cumem_allocator.cpp` - CU内存分配器
+**核心理念**：EngineCore（调度+执行循环）与 EngineCoreClient（IPC 代理）的解耦。
 
-7. **采样内核**:
-   - `sampler.cu` - Top-k/Top-p采样
-   - `topk.cu` - TopK操作
-   - `persistent_topk.cuh` - 持久化TopK
+v1 架构最显著的设计决策是将 [`EngineCore`](file:///workspace/vllm/v1/engine/core.py#L91-L91) 作为纯计算内核：
+- 它不知道自己运行在哪个进程中（同进程 / 子进程 / Ray Actor）
+- 它只通过 `SchedulerInterface` 和 `Executor` 抽象交互
+- 进程通信（ZMQ socket / Ray call）由 [`EngineCoreProc`](file:///workspace/vllm/v1/engine/core.py#L806-L806) 包装层处理
 
-8. **平台特定**:
-   - **CPU** ([cpu/](../csrc/cpu/)): CPU优化（AMX, NEON, VSX, VXE）
-   - **ROCm** ([rocm/](../csrc/rocm/)): AMD GPU支持
+**为什么这样做**：
+- 同一套调度逻辑可以复用在单机、多机、Ray 集群等多种部署模式
+- 单元测试可以直接构造 `EngineCore` 进行测试，无需模拟网络
+- 未来可以替换 IPC 机制（如改为 gRPC）而不影响核心逻辑
 
-9. **工具库**:
-   - `cuda_utils.h/cu` - CUDA工具函数
-   - `dispatch_utils.h` - 内核分发
-   - `type_convert.cu` - 类型转换
+### 8.5 异步优先（Async-First）
+
+**核心理念**：默认启用异步调度，最大化 GPU 利用率。
+
+v1 引入了 **Async Scheduling**（[`config/scheduler.py`](file:///workspace/vllm/config/scheduler.py) 中的 `async_scheduling` 配置项），其核心思想是：
+- 将采样（sampling）操作从模型前向传播的关键路径中解耦
+- 在模型执行当前 batch 时，调度器同时准备下一个 batch
+- 通过 `Future` 对象协调两个并发的操作
+
+**为什么这样做**：传统同步调度在每个 iteration 中存在「调度 → 执行 → 采样 → 更新」的串行瓶颈，异步调度将这些步骤部分重叠，减少了 GPU 空闲时间。
+
+### 8.6 渐进式复杂度（Progressive Complexity）
+
+**核心理念**：提供从简单到复杂的多种优化级别。
+
+vLLM 的 `-O` 优化级别（[`config/vllm.py`](file:///workspace/vllm/config/vllm.py#L175-L258)）体现了这一哲学：
+
+| 级别 | 编译 | CUDAGraph | Fusion | 适用场景 |
+|------|------|-----------|--------|----------|
+| **-O0** | 关闭 | NONE | 无 | 最快启动、调试 |
+| **-O1** | Dynamo+Inductor | Piecewise | Norm/Act | 快速启动 + 基础加速 |
+| **-O2** | 全量编译 | Full+Piecewise | 全部融合（含 SP/AllReduce） | 默认选项、平衡性能 |
+| **-O3** | 全量编译 | Full+Piecewise | 全部融合 + FlashInfer autotune | 最大性能、可接受较长启动时间 |
+
+**为什么这样做**：用户可以根据自己的延迟/启动时间偏好灵活选择，而不需要理解底层每一个优化开关。
+
+### 8.7 平台抽象（Platform Abstraction）
+
+**核心理念**：通过 `Platform` 接口屏蔽硬件差异。
+
+[`platforms/`](file:///workspace/vllm/platforms/) 目录定义了统一的平台接口（`current_platform`），各平台（CUDA / ROCm / XPU / TPU / CPU）实现各自的：
+- 设备能力查询（`get_device_capability()`）
+- 注意力后端选择
+- 自定义算子注册
+- 内存分配策略
+- 编译配置调整（`apply_config_platform_defaults()`）
+
+**为什么这样做**：确保 vLLM 的核心算法代码与硬件无关，新增硬件支持只需实现 Platform 接口。
 
 ---
 
-## 8. 总结与洞察
+## 附录：关键文件速查
 
-### 8.1 架构优势
-
-✅ **模块化设计**: 清晰的分层架构，各层职责明确
-✅ **高性能**: 多层次的优化（算法、内核、编译、并行）
-✅ **可扩展性**: 插件化的后端选择，易于添加新硬件/模型支持
-✅ **生产就绪**: 完善的监控、错误处理、API兼容性
-✅ **社区活跃**: 2000+贡献者，频繁更新，广泛采用
-
-### 8.2 技术亮点
-
-🌟 **PagedAttention**: 真正的创新，解决LLM服务的内存瓶颈
-🌟 **Continuous Batching**: 显著提升吞吐量和资源利用率
-🌟 **解耦架构**: Prefill-Decode分离适应不同硬件特性
-🌟 **丰富的量化支持**: 从FP8到INT4的全谱系量化
-🌟 **推测解码**: 2-4x推理加速（需配合小模型）
-
-### 8.3 代码质量
-
-- **类型安全**: 广泛使用Python类型注解和mypy检查
-- **代码风格**: ruff lint强制统一风格
-- **测试覆盖**: 单元测试、集成测试、基准测试
-- **文档完善**: docstring、API文档、架构文档
-- **向后兼容**: v0→v1平滑过渡，保持API稳定
-
-### 8.4 学习建议
-
-对于想要深入理解vLLM的开发者，建议的学习路径：
-
-1. **入门** (1-2周):
-   - 阅读 [README.md](../README.md) 了解基本概念
-   - 运行示例：`python -m vllm.entrypoints.openai.api_server`
-   - 理解PagedAttention原理（读论文）
-
-2. **进阶** (2-4周):
-   - 学习配置系统：[`config/vllm.py`](../vllm/config/vllm.py)
-   - 理解引擎流程：[`v1/engine/llm_engine.py`](../vllm/v1/engine/llm_engine.py)
-   - 研究调度器：[`v1/core/sched/scheduler.py`](../vllm/v1/core/sched/scheduler.py)
-
-3. **深入** (1-2月):
-   - 研究注意力实现：[`v1/attention/`](../vllm/v1/attention/)
-   - 学习CUDA内核：[`csrc/attention/`](../csrc/attention/)
-   - 理解分布式：[`distributed/`](../vllm/distributed/)
-
-4. **贡献** (持续):
-   - 从小的bug fix或文档改进开始
-   - 尝试添加新模型支持
-   - 参与性能优化
-
-### 8.5 项目规模统计
-
-**代码量估算**:
-- Python代码: ~150,000+ 行（vllm/目录）
-- CUDA/C++代码: ~50,000+ 行（csrc/目录）
-- 配置文件: ~500+ 个JSON/YAML
-- 测试代码: ~30,000+ 行（tests/目录）
-- 文档: ~1,000+ 页
-
-**模块数量**:
-- Python包/模块: 300+
-- CUDA内核: 100+
-- 支持的模型架构: 200+
-- API端点: 50+
-- 配置选项: 500+
-
-### 8.6 未来发展方向
-
-基于代码结构和社区动态，可以预见的发展方向：
-
-1. **v1架构成熟化**: 完成v0→v1迁移，简化代码
-2. **更多硬件支持**: 持续扩展新硬件平台
-3. **长序列优化**: 改进1M+ token的处理能力
-4. **多模态增强**: 更好的图像/视频/音频理解
-5. **Agent能力**: 强化工具调用和推理链
-6. **边缘部署**: 更轻量级的移动/边缘设备支持
-7. **训练集成**: 从纯推理扩展到微调和训练
-
----
-
-## 附录：关键文件索引
-
-### 核心入口
-- [`__init__.py`](../vllm/__init__.py) - 包初始化，导出主要API
-- [`entrypoints/llm.py`](../vllm/entrypoints/llm.py) - LLM高级API
-- [`entrypoints/openai/api_server.py`](../vllm/entrypoints/openai/api_server.py) - OpenAI服务器
-
-### 引擎核心
-- [`v1/engine/llm_engine.py`](../vllm/v1/engine/llm_engine.py) - 主引擎
-- [`v1/engine/async_llm.py`](../vllm/v1/engine/async_llm.py) - 异步引擎
-- [`v1/core/sched/scheduler.py`](../vllm/v1/core/sched/scheduler.py) - 调度器
-- [`v1/core/kv_cache_manager.py`](../vllm/v1/core/kv_cache_manager.py) - KV缓存管理
-
-### 模型执行
-- [`v1/worker/gpu/model_runner.py`](../vllm/v1/worker/gpu/model_runner.py) - GPU模型运行器
-- [`v1/attention/backends/`](../vllm/v1/attention/backends/) - 注意力后端
-- [`model_executor/layers/attention/`](../vllm/model_executor/layers/attention/) - 注意力层
-- [`model_executor/layers/fused_moe/`](../vllm/model_executor/layers/fused_moe/) - MoE层
-
-### 内核实现
-- [`csrc/attention/paged_attention_v2.cu`](../csrc/attention/paged_attention_v2.cu) - PagedAttention V2
-- [`csrc/quantization/`](../csrc/quantization/) - 量化内核
-- [`csrc/moe/`](../csrc/moe/) - MoE内核
-
-### 配置系统
-- [`config/vllm.py`](../vllm/config/vllm.py) - 主配置类
-- [`config/parallel.py`](../vllm/config/parallel.py) - 并行配置
-- [`config/cache.py`](../vllm/config/cache.py) - 缓存配置
-
-### 分布式
-- [`distributed/parallel_state.py`](../vllm/distributed/parallel_state.py) - 并行状态管理
-- [`distributed/kv_transfer/`](../vllm/distributed/kv_transfer/) - KV传输系统
-- [`distributed/device_communicators/`](../vllm/distributed/device_communicators/) - 通信原语
-
----
-
-**文档版本**: 1.0
-**生成日期**: 2026-05-10
-**分析的vLLM版本**: 基于 main 分支最新代码
-**分析深度**: 全面深入（涵盖架构、模块、流程、设计模式、技术细节）
+| 文件 | 角色 | 一句话说明 |
+|------|------|-----------|
+| [`__init__.py`](file:///workspace/vllm/__init__.py) | 包入口 | MODULE_ATTRS + `__getattr__` 延迟导入，向后兼容的枢纽 |
+| [`engine/llm_engine.py`](file:///workspace/vllm/engine/llm_engine.py) | 兼容层 | `LLMEngine = V1LLMEngine` 别名重定向，v0→v1 迁移的见证 |
+| [`v1/engine/core.py`](file:///workspace/vllm/v1/engine/core.py) | 引擎内核 | `EngineCore` / `EngineCoreProc` / `DPEngineCoreProc`，调度+执行主循环 |
+| [`v1/engine/llm_engine.py`](file:///workspace/vllm/v1/engine/llm_engine.py) | 引擎总控 | `LLMEngine` v1 版本，管理 EngineCoreClient + IO Processor |
+| [`config/vllm.py`](file:///workspace/vllm/config/vllm.py) | 配置中枢 | `VllmConfig` 聚合 20+ 子配置，500+ 行验证逻辑 |
+| [`v1/core/sched/scheduler.py`](file:///workspace/vllm/v1/core/sched/scheduler.py) | 调度器 | Chunked Prefill / 双调度 / 请求排队核心实现 |
+| [`v1/worker/gpu_model_runner.py`](file:///workspace/vllm/v1/worker/gpu_model_runner.py) | 模型运行器 | 模型前向传播、CUDA Graph 执行、采样触发 |
+| [`v1/executor/abstract.py`](file:///workspace/vllm/v1/executor/abstract.py) | 执行器基类 | Executor 抽象接口，定义 execute_model/shutdown 等契约 |
+| [`model_executor/models/registry.py`](file:///workspace/vllm/model_executor/models/registry.py) | 模型注册表 | `@ModelRouter.register("name")` 装饰器的定义 |
+| [`entrypoints/llm.py`](file:///workspace/vllm/entrypoints/llm.py) | 高级 SDK | `LLM` 类，面向最终用户的 Python API |
+| [`sequence.py`](file:///workspace/vllm/sequence.py) | 数据结构 | `IntermediateTensors` 用于 Pipeline Parallel 阶段间数据传递 |
+| [`compilation/cuda_graph.py`](file:///workspace/vllm/compilation/cuda_graph.py) | CUDA Graph | CUDA Graph 捕获、缓存、分派的核心逻辑 |
