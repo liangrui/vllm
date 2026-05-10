@@ -43,6 +43,40 @@
 ### 文件0: `vllm_code_structure_analysis.md`（总览文件）
 **定位**: 更新已有文件，作为整个分析的导航入口和宏观概览
 
+**📌 本文档总括**（用 Mermaid mindmap 展示整个分析体系的全景）:
+```mermaid
+mindmap
+  root((vLLM深度分析))
+    架构总览
+      分层设计
+      版本演进v0→v1
+      设计哲学
+    核心子系统
+      配置系统
+      引擎核心
+      调度器
+      PagedAttention
+      注意力后端
+      模型执行器
+      Worker/执行器
+      KV缓存
+      采样系统
+      多模态
+      量化
+      分布式
+      LoRA
+      API层
+      CUDA内核
+      编译优化
+      结构化输出
+      推测解码
+      监控指标
+    设计洞察
+      设计模式
+      扩展性
+      性能策略
+```
+
 **内容大纲**:
 1. **项目概述** — 基本信息、核心价值主张、生态地位
 2. **整体架构图** — 六层架构（服务层→引擎层→调度核心→执行器层→模型执行器→内核层），含 Mermaid 图
@@ -57,6 +91,18 @@
 
 ### 文件1: `01_architecture_overview.md`
 **定位**: 架构层面的深度分析，建立全局认知
+
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph A[架构总览]
+        direction TB
+        A1[分层架构<br/>6层职责边界] --> A2[v0→v1演进<br/>迁移策略与兼容]
+        A2 --> A3[核心数据结构<br/>Sequence/Request/Output]
+        A3 --> A4[设计原则<br/>配置驱动/注册表/策略/工厂]
+    end
+    style A fill:#e1f5fe
+```
 
 **内容**:
 - **分层架构详解**
@@ -81,6 +127,27 @@
 
 ### 文件2: `02_config_system.md`
 **定位**: 完整配置体系分析
+
+**📌 本文档总括**:
+```mermaid
+graph LR
+    subgraph V[VllmConfig 顶层聚合]
+        direction LR
+        M[ModelConfig<br/>模型架构] --> C[CacheConfig<br/>KV缓存]
+        C --> P[ParallelConfig<br/>并行策略]
+        P --> S[SchedulerConfig<br/>调度参数]
+        S --> D[DeviceConfig<br/>设备选择]
+        D --> L[LoadConfig<br/>权重加载]
+        L --> LO[LoRAConfig]
+        LO --> Q[QuantizationConfig]
+        Q --> CM[CompilationConfig]
+        CM --> SP[SpeculativeConfig]
+        SP --> OB[ObservabilityConfig]
+    end
+    ENV[环境变量覆盖] --> V
+    VALID[验证与合并] --> V
+    style V fill:#fff3e0
+```
 
 **内容**:
 - **VllmConfig 主配置类**（完整字段列表+说明）
@@ -107,6 +174,29 @@
 ### 文件3: `03_engine_core.md`
 **定位**: 引擎层的核心实现分析
 
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph E[引擎层核心]
+        direction TB
+        LLM[LLMEngine<br/>同步引擎] --> ASYNC[AsyncLLM<br/>异步引擎]
+        ASYNC --> CORE[EngineCore<br/>解耦执行循环]
+    end
+    subgraph P[处理管线]
+        IP[InputProcessor<br/>请求预处理] --> SCHED[Scheduler<br/>调度决策]
+        SCHED --> W[Worker<br/>模型执行]
+        W --> OP[OutputProcessor<br/>输出后处理]
+    end
+    subgraph AUX[辅助组件]
+        DET[Detokenizer<br/>反token化]
+        COORD[Coordinator<br/>多节点协调]
+        EX[异常处理]
+    end
+    CORE --> P
+    P --> AUX
+    style E fill:#e8f5e9
+```
+
 **内容**:
 - **LLMEngine 类** (`v1/engine/llm_engine.py`)
   - 初始化流程：配置解析 → Executor选择 → Worker创建
@@ -128,6 +218,29 @@
 
 ### 文件4: `04_scheduler.md`
 **定位**: 调度系统的深度剖析
+
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph SCHED[调度系统]
+        direction TB
+        RQ[RequestQueue<br/>waiting/running<br/>swapped/finished] --> SCH[Scheduler.schedule]
+        SCH --> DEC{调度决策}
+        DEC --> PREFILL[Prefill请求选择]
+        DEC --> DECODE[Decode请求选择]
+        PREFILL --> ALLOC[KV缓存块分配]
+        DECODE --> ALLOC
+        ALLOC --> OUT[SchedulerOutput]
+    end
+    subgraph STRAT[调度策略]
+        FCFS[FCFS先来先到]
+        PREEMPT[抢占与恢复]
+        CHUNKED[Chunked Prefill]
+        DECOUPLE[Prefill-Decode解耦]
+    end
+    STRAT -.-> SCH
+    style SCHED fill:#fce4ec
+```
 
 **内容**:
 - **Scheduler 类** (`v1/core/sched/scheduler.py`)
@@ -152,6 +265,28 @@
 
 ### 文件5: `05_pagedattention.md`
 **定位**: PagedAttention 核心创新深度分析
+
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph PROBLEM[传统问题]
+        FRAG[内存碎片化]
+        WASTE[内存浪费<br/>预留最大长度]
+        STATIC[无法动态调整]
+    end
+    subgraph SOLUTION[PagedAttention方案]
+        direction TB
+        BLOCK[Block页概念<br/>固定16 tokens] --> BT[BlockTable<br/>逻辑→物理映射]
+        BT --> POOL[BlockPool<br/>物理内存池]
+    end
+    subgraph ADV[核心优势]
+        MS[Memory Sharing<br/>Copy-on-Write]
+        PC[Prefix Caching<br/>前缀复用]
+        EFF[2-4x内存节省]
+    end
+    PROBLEM --> SOLUTION --> ADV
+    style SOLUTION fill:#f3e5f5
+```
 
 **内容**:
 - **问题背景**: 传统 KV 缓存的内存浪费问题
@@ -180,6 +315,32 @@
 
 ### 文件6: `06_attention_backends.md`
 **定位**: 所有注意力后端实现的详细分析
+
+**📌 本文档总括**:
+```mermaid
+graph TB
+    SEL[AttentionBackend<br/>Selector] --> FA[FlashAttention]
+    SEL --> FI[FlashInfer]
+    SEL --> MLA[MLA<br/>DeepSeek专用]
+    SEL --> TR[Triton Attention]
+    SEL --> ROCm[ROCm AMD]
+    SEL --> CPU[CPU Fallback]
+    SEL --> SPECIAL[特殊注意力]
+    MLA --> MLA_FA[FlashAttn变体]
+    MLA --> MLA_FI[FlashInfer变体]
+    MLA --> MLA_TR[Triton变体]
+    MLA --> MLA_CT[Cutlass变体]
+    SPECIAL --> MAMBA[Mamba/Mamba2 SSM]
+    SPECIAL --> LA[Linear Attention]
+    SPECIAL --> GDN[GDN Attention]
+    subgraph OPS[底层算子]
+        PA[PagedAttn]
+        CPF[ChunkedPrefill]
+        TP[TritonPrefill]
+        TD[TritonDecode]
+    end
+    style SEL fill:#e0f7fa
+```
 
 **内容**:
 - **注意力后端选择器** (`v1/attention/selector.py`)
@@ -214,6 +375,29 @@
 ### 文件7: `07_model_executor.md`
 **定位**: 模型执行层全貌
 
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph REG[模型注册]
+        MR[ModelRegistry<br/>装饰器注册] --> IF[ModelForCausalLM<br/>基类接口]
+    end
+    subgraph FAMILIES[模型家族]
+        LLAMA[LLaMA系列] --> COMP[Transformer组件]
+        DS[DeepSeek MoE+MLA] --> COMP
+        QW[Qwen系列] --> COMP
+        MS[Mistral/Gemma] --> COMP
+        MM[多模态LLaVA等] --> COMP
+    end
+    subgraph COMPONENTS[层组件]
+        COMP --> ATTN[Attention层]
+        COMP --> MLP[MLP/FFN]
+        COMP --> NORM[RMSNorm/LayerNorm]
+        COMP --> ROPE[RoPE编码]
+    end
+    REG --> FAMILIES
+    style REG fill:#fff8e1
+```
+
 **内容**:
 - **ModelRegistry** — 模型注册表机制
   - 装饰器注册模式
@@ -239,6 +423,28 @@
 
 ### 文件8: `08_worker_and_executor.md`
 **定位**: 执行框架分析
+
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph EXEC[执行器层]
+        ABS[Executor<br/>抽象接口] --> UP[UniProcExecutor<br/>单进程]
+        ABS --> MP[MultiProcExecutor<br/>多进程]
+        ABS --> RAY[RayExecutorV2<br/>Ray分布式]
+    end
+    subgraph WORKER[Worker层]
+        BASE[WorkerBase] --> GW[GPUWorker]
+        BASE --> CW[CPUWorker]
+        BASE --> TW[TPUWorker]
+        BASE --> XW[XPUWorker]
+    end
+    subgraph RUNNER[模型运行器]
+        GMR[GPUModelRunner<br/>前向传播编排]
+        CMR[CPUModelRunner]
+    end
+    EXEC --> WORKER --> RUNNER
+    style EXEC fill:#ede7f6
+```
 
 **内容**:
 - **Executor 抽象** (`v1/executor/abstract.py`)
@@ -272,6 +478,26 @@
 ### 文件9: `09_kv_cache.md`
 **定位**: KV 缓存系统完整分析
 
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph MGR[缓存管理器层次]
+        KCM[KVCacheManager<br/>顶层抽象] --> ST[SingleTypeKVCacheManager]
+        KCM --> EC[EncoderCacheManager]
+    end
+    subgraph COORD[协调与接口]
+        CORD[KVCacheCoordinator<br/>多GPU协调]
+        IFACE[KVCacheInterface<br/>统一访问API]
+    end
+    subgraph EXTEND[扩展能力]
+        OFF[KV Offload<br/>CPU卸载]
+        TRS[KV Transfer<br/>跨节点传输]
+        PC[Prefix Caching<br/>前缀复用]
+    end
+    MGR --> COORD --> EXTEND
+    style MGR fill:#e0f2f1
+```
+
 **内容**:
 - **KV Cache Manager 层次**
   - `KVCacheManager` — 顶层抽象
@@ -298,6 +524,27 @@
 ### 文件10: `10_sampling.md`
 **定位**: 采样与生成策略分析
 
+**📌 本文档总括**:
+```mermaid
+graph LR
+    subgraph PARAM[采样参数]
+        SP[SamplingParams<br/>temp/top_p/top_k]
+    end
+    subgraph CORE[采样核心]
+        SM[Sampler.sample] --> LP[LogitsProcessor链]
+        LP --> PROB[概率分布变换]
+        PROB --> TOKEN[token选择]
+    end
+    subgraph ADV[高级采样]
+        RS[RejectionSampler<br/>推测解码验证]
+        PS[ParallelSampling<br/>Beam Search等]
+        LP2[Logprobs计算]
+        TBS[ThinkingBudget<br/>推理预算控制]
+    end
+    PARAM --> CORE --> ADV
+    style CORE fill:#fbe9e7
+```
+
 **内容**:
 - **SamplingParams** (`sampling_params.py`)
   - temperature / top_p / top_k / max_tokens
@@ -323,6 +570,27 @@
 ### 文件11: `11_multimodal.md`
 **定位**: 多模态处理管线分析
 
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph INPUT[多模态输入]
+        IMG[图像] --> REG[MultiModalRegistry]
+        AUD[音频] --> REG
+        VID[视频] --> REG
+    end
+    subgraph PIPE[处理管线]
+        REG --> CONN[Media Connector<br/>加载与预处理]
+        CONN --> PROC[Processor<br/>特征提取]
+        PROC --> EBM[EncoderBudget<br/>Token数量控制]
+    end
+    subgraph ENCODER[编码器]
+        CLIP[CLIP/SigLIP<br/>视觉]
+        WHIS[Whisper<br/>音频]
+    end
+    PIPE --> ENCODER
+    style REG fill:#f1f8e9
+```
+
 **内容**:
 - **MultiModalRegistry** — 多模态处理器注册表
 - **媒体连接器** (`media/`)
@@ -347,6 +615,32 @@
 ### 文件12: `12_quantization.md`
 **定位**: 量化方案全面分析
 
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph Q[量化方案矩阵]
+        direction LR
+        FP8[FP8浮点<br/>H100原生]
+        INT[INT8/INT4整数]
+        GPTQ[GPTQ训练后量化]
+        AWQ[AWQ激活感知]
+        GGUF[GGUF格式]
+        NV4[NVFP4 Blackwell]
+    end
+    subgraph IMPL[实现层次]
+        CFG[量化配置类] --> LIN[量化线性层GEMM]
+        LIN --> CU[CUDA量化内核]
+    end
+    subgraph KERNEL[内核类型]
+        AWQ_K[AWQ内核]
+        GPTQ_K[GPTQ内核]
+        MARLIN[Marlin 4bit]
+        MACH[Machete新一代]
+    end
+    Q --> IMPL --> KERNEL
+    style Q fill:#fff9c4
+```
+
 **内容**:
 - **量化方案矩阵**（精度/权重/激活/用途对比表格）
 - **FP8 量化**
@@ -368,6 +662,36 @@
 
 ### 文件13: `13_distributed.md`
 **定位**: 分布式计算分析
+
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph PARALLEL[并行策略]
+        TP[Tensor Parallelism]
+        PP[Pipeline Parallelism]
+        DP[Data Parallelism]
+        EP[Expert Parallelism MoE]
+    end
+    subgraph STATE[状态与通信]
+        PS[ParallelState<br/>NCCL通信域] --> DC[DeviceCommunicators]
+    end
+    subgraph COMM[通信原语]
+        AR[AllReduce]
+        AG[AllGather]
+        RS[ReduceScatter]
+        CAR[Custom AllReduce]
+        CQR[Quick Reduce]
+        SHM[SHM Broadcast]
+    end
+    subgraph TRANSFER[数据传输]
+        KT[KV Transfer]
+        WT[Weight Transfer]
+        EC_T[EC Transfer]
+    end
+    PARALLEL --> STATE --> COMM
+    COMM --> TRANSFER
+    style PARALLEL fill:#e8eaf6
+```
 
 **内容**:
 - **并行策略**
@@ -397,6 +721,30 @@
 ### 文件14: `14_lora.md`
 **定位**: LoRA 适配器系统分析
 
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph CORE[LoRA核心]
+        CFG[LoRAConfig] --> LM[LoRAModel]
+        LM --> LW[LoRAWeights]
+        LW --> LR[LoRARequest<br/>请求级绑定]
+    end
+    subgraph LAYER[层实现]
+        CPL[ColParallel+LoRA]
+        RPL[RowParallel+LoRA]
+        FML[FusedMoE+LoRA]
+        LGL[LogitsProc+LoRA]
+    end
+    subgraph RUNTIME[运行时]
+        PUNICA[Punica GPU计算]
+        RESOLVER[Resolver解析]
+        WMGR[WorkerManager管理]
+        DYN[动态加载/卸载]
+    end
+    CORE --> LAYER --> RUNTIME
+    style CORE fill:#ffe0b2
+```
+
 **内容**:
 - **LoRA 概述** — Low-Rank Adaptation 原理
 - **LoRAConfig** — 配置参数
@@ -419,6 +767,31 @@
 
 ### 文件15: `15_api_layer.md`
 **定位**: 服务接口层分析
+
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph API[服务接口]
+        OAI[OpenAI API<br/>FastAPI]
+        ANT[Anthropic API<br/>协议适配]
+        GRPC[gRPC Server]
+        CLI[CLI命令行]
+    end
+    subgraph ROUTES[核心路由]
+        CHAT[/v1/chat/completions]
+        CMP[/v1/completions]
+        EMB[/v1/embeddings]
+        POOL[Pooling端点]
+    end
+    subgraph AUX[辅助功能]
+        BATCH[Batch Serving]
+        SAGEMAKER[SageMaker]
+        MCP[MCP Tool Server]
+        SSL[SSL/TLS]
+    end
+    API --> ROUTES --> AUX
+    style API fill:#fce4ec
+```
 
 **内容**:
 - **OpenAI 兼容 API** (`entrypoints/openai/`)
@@ -445,6 +818,30 @@
 
 ### 文件16: `16_cuda_kernels.md`
 **定位**: CUDA/C++ 内核层深度分析
+
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph BUILD[构建系统]
+        CMK[CMakeLists.txt]
+        TU[torch_utils扩展]
+    end
+    subgraph KERNELS[内核类别]
+        ATTN[注意力内核<br/>PagedAttn V1/V2<br/>MLA]
+        CACHE[缓存内核<br/>KV读写/reshape]
+        ACT[激活函数<br/>Gelu/SiLU/RMSNorm]
+        QUANT[量化内核<br/>AWQ/GPTQ/GGUF<br/>Marlin/Machete]
+        MOE[MoE内核<br/>TopK路由/WNA16]
+        COMM[通信内核<br/>AllReduce]
+        SAMP[采样内核<br/>Top-k/Top-p]
+    end
+    subgraph PLATFORM[平台特定]
+        CPU_K[CPU AMX/NEON]
+        ROCM_K[ROCm AMD GPU]
+    end
+    BUILD --> KERNELS --> PLATFORM
+    style KERNELS fill:#d1c4e9
+```
 
 **内容**:
 - **构建系统**
@@ -490,6 +887,30 @@
 ### 文件17: `17_compilation_and_optimization.md`
 **定位**: 编译与运行时优化分析
 
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph COMPILE[编译优化]
+        TC[torch.compile<br/>Dynamo+Inductor] --> PASS[编译Passes]
+        PASS --> OP[自定义Op注册<br/>torch.library]
+    end
+    subgraph CUDAG[CUDA Graphs]
+        PW[Piecewise CG<br/>子图捕获] --> DISP[CUDAGraph Dispatcher]
+        FW[Full CG<br/>整体捕获] --> DISP
+        ENC[Encoder CGs] --> DISP
+    end
+    subgraph SUPPORT[支撑系统]
+        PR[Partition Rules]
+        CG[Codegen生成]
+        CACH[编译缓存]
+        MON[Monitor监控]
+        CNT[Counter计数]
+        TRIT[Triton Utils]
+    end
+    COMPILE & CUDAG --> SUPPORT
+    style COMPILE fill:#b2dfdb
+```
+
 **内容**:
 - **torch.compile 集成**
   - Dynamo + Inductor 编译流水线
@@ -520,6 +941,27 @@
 ### 文件18: `18_structured_output.md`
 **定位**: 结构化输出约束分析
 
+**📌 本文档总括**:
+```mermaid
+graph TB
+    CFG[StructuredOutputsConfig] --> BACKENDS
+    subgraph BACKENDS[后端实现]
+        XG[xgrammar<br/>高性能语法]
+        OL[outlines<br/>FSM约束]
+        LME[lm-format-enforcer<br/>轻量强制]
+        GD[guidance<br/>Guidance库]
+    end
+    subgraph TYPES[支持结构]
+        JSON[JSON Schema]
+        RE[正则表达式]
+        GRAM[Grammar EBNF/CFG]
+        CHOICE[Choice约束]
+        TOOL[工具调用格式]
+    end
+    BACKENDS --> TYPES
+    style BACKENDS fill:#c8e6c9
+```
+
 **内容**:
 - **StructuredOutputsConfig** — 配置
 - **后端实现**:
@@ -540,6 +982,30 @@
 
 ### 文件19: `19_speculative_decode.md`
 **定位**: 推测解码加速技术分析
+
+**📌 本文档总括**:
+```mermaid
+graph LR
+    subgraph ARCH[推测解码架构]
+        DRAFT[Draft Model<br/>快速草稿] --> VERIFY[Target Model<br/>验证]
+    end
+    subgraph METHODS[草稿方法]
+        EAGLE[EAGLE Early Exit]
+        MED[Medusa 多头预测]
+        NGRAM[N-gram Proposer]
+        NGRAM_GPU[N-gram GPU]
+        DFLASH[DFlash]
+        SUFF[Suffix Decoding]
+        G4[Gemma4专用]
+        MLP_S[MLP Speculator]
+    end
+    subgraph METRICS[指标]
+        ACC[接受率 60-80%]
+        SPEED[加速比 2-4x]
+    end
+    ARCH --> METHODS --> METRICS
+    style ARCH fill:#ffccbc
+```
 
 **内容**:
 - **推测解码原理**
@@ -566,6 +1032,33 @@
 ### 文件20: `20_metrics_and_monitoring.md`
 **定位**: 可观测性分析
 
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph COLLECT[指标收集]
+        PERF[perf.py<br/>延迟/吞吐/GPU]
+        STATS[stats.py<br/>迭代/缓存统计]
+        PROM[prometheus.py<br/>导出端点]
+        READER[reader.py<br/>读取接口]
+    end
+    subgraph LOG[日志系统]
+        LF[loggers.py 工厂]
+        RW[ray_wrappers 适配]
+    end
+    subgraph TRACE[追踪与性能]
+        OTEL[OpenTelemetry]
+        LWP[layerwise_profile]
+        NVTX[NVTX hooks]
+    end
+    subgraph MGR[管理]
+        SLF[StatLoggerFactory]
+        SLM[StatLoggerManager]
+    end
+    COLLECT --> LOG --> TRACE
+    MGR -.-> COLLECT
+    style COLLECT fill:#b3e5fc
+```
+
 **内容**:
 - **指标收集** (`v1/metrics/`)
   - `perf.py` — 性能指标（延迟 TTFT/TBT/TPL, 吞吐量, GPU 利用率）
@@ -588,6 +1081,29 @@
 
 ### 文件21: `21_design_patterns.md`
 **定位**: 设计模式与架构洞察总结
+
+**📌 本文档总括**:
+```mermaid
+graph TB
+    subgraph PATTERNS[设计模式]
+        STRAT[策略模式<br/>注意力/线性/量化后端]
+        FACTORY[工厂模式<br/>Executor/Worker/Connector]
+        OBS[观察者模式<br/>指标收集/事件发布]
+        REG[注册表模式<br/>模型/多模态/tokenizer]
+        DECOR[装饰器模式<br/>模型注册/配置验证]
+        ADAPT[适配器模式<br/>API协议转换]
+        BUILDER[建造者模式<br/>配置构建]
+    end
+    subgraph INSIGHTS[架构洞察]
+        PRIN[代码组织原则]
+        TRADE[优势与权衡]
+        EXT[可扩展性设计]
+        PERF[性能优化策略]
+        FUTURE[未来方向推断]
+    end
+    PATTERNS --> INSIGHTS
+    style PATTERNS fill:#f8bbd0
+```
 
 **内容**:
 - **设计模式清单**
@@ -634,11 +1150,13 @@
 
 ## 四、质量标准
 
-1. **每个文件** 都包含：概念解释、架构图(Mermaid)、核心代码（带注释）、数据流、设计决策理由
-2. **代码示例** 均来自实际源码，标注文件路径和行号范围
-3. **先宏观后细化**：每节先讲"是什么、为什么"，再讲"怎么实现"
-4. **面向系统架构师**：侧重设计权衡、接口契约、扩展机制，而非逐行代码走读
-5. **中文撰写**，技术术语保留英文
+1. **每个文件** 开头包含「定位」+「📌 图示化总括（Mermaid 图）」，直观展示本文档要说明的内容范围和结构
+2. **每个文件** 包含：概念解释、架构图(Mermaid)、核心代码（带注释）、数据流、设计决策理由
+3. 代码示例均来自实际源码，标注文件路径和行号范围
+4. **先宏观后细化**：每节先讲"是什么、为什么"，再讲"怎么实现"
+5. 面向系统架构师：侧重设计权衡、接口契约、扩展机制，而非逐行代码走读
+6. 中文撰写，技术术语保留英文
+7. 每个文件的 Mermaid 图使用不同配色，便于区分
 
 ## 五、假设与决策
 
